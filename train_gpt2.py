@@ -85,6 +85,27 @@ class GPT(nn.Module):
         ))
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
 
+    def float(self, idx):
+        # idx is of shape (B, T) and represents the token indices in the vocabulary
+        B, T = idx.size()
+        assert T <= self.config.block_size, f"Cannot forward sequence of length {T}, block size is only {self.config.block_size}"
+        # forward the token and position embeddings
+        pos = torch.arange(0, T, dtype=torch.long, device=idx.device)  # shape (T,)
+        pos_emb = self.transformer.wpe(pos)  # shape (T, n_embd)
+        tok_emb = self.transformer.wte(idx)  # shape (B, T, n_embd)
+        x = tok_emb + pos_emb
+
+        # forward the transformer blocks
+        for block in self.transformer.h:
+            x = block(x)
+
+        # apply the final layer norm
+        x = self.transformer.ln_f(x)
+
+        logits = self.lm_head(x)  # shape (B, T, vocab_size)
+        return logits
+
+    
     @classmethod
     def from_pretrained(cls, model_type):
         """Loads a pretrained GPT model from the Hugging Face model hub."""
@@ -140,5 +161,9 @@ class GPT(nn.Module):
 
         return model
 
-model = GPT.from_pretrained('gpt2')  # Load the pretrained GPT-2 model
-print("Model loaded successfully.")
+num_return_sequences = 5
+max_length = 30
+
+model = GPT.from_pretrained('gpt2')
+model.eval()  
+model.to('cuda')
