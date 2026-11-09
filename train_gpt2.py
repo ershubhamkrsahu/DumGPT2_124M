@@ -6,6 +6,7 @@ from torch.nn import functional as f
 import tiktoken
 import sys
 import time
+import math
 
 # ---------------------------------------------------------------------------------
 # INITIALIZATIONS
@@ -163,7 +164,7 @@ class GPT(nn.Module):
 
         # create a form-scratch initialized minGPT model
 
-        config = GPTConfig(vocab_size=50304)    # (optimise) ugly number 50257 -> 50304
+        config = GPTConfig(vocab_size=50304)    # (optimise) ugly_number 50257 -> 50304
         model = GPT(config)
         sd = model.state_dict()
         sd_keys = sd.keys()
@@ -259,9 +260,28 @@ model.to(device)
 # add compile for faster training on GPU (if available)
 model = torch.compile(model, mode="default")
 
-# optimizer
-optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)
-for i in range(50):
+max_lr = 3e-4
+min_lr = max_lr * 0.1
+warmup_steps = 10
+max_steps = 50
+
+# learning rate cosine decay scheduler
+def get_lr(it):
+    # 1) linear warmup for warmup_iters steps
+    if it < warmup_steps:
+        return max_lr * (it + 1) / warmup_steps 
+    # 2) if it > lr_decay_iters, return min_lr
+    if it > max_steps:
+        return min_lr
+    # 3) in between, use cosine decay down to min_lr
+    decay_ratio = (it - warmup_steps) / (max_steps - warmup_steps)
+    assert 0 <= decay_ratio <= 1
+    coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio))
+    return min_lr + coeff * (max_lr - min_lr)
+
+# optimizer 
+optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, betas=(0.9, 0.95), eps=1e-8) # gpt3 hyperparameters
+for step in range(max_steps):
     torch.cuda.synchronize()
     t0 = time.time()
 
@@ -275,6 +295,15 @@ for i in range(50):
         logits, loss = model(x, y)
 
     loss.backward()
+
+    # clipping gradients prevents shocks
+    norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+
+    # determine and set the learning rate for this iteration
+    lr = get_lr(step)
+    for param_group in optimizer.param_groups:
+        param_group['lr'] = lr
+    
     optimizer.step()
 
     torch.cuda.synchronize()
@@ -284,10 +313,18 @@ for i in range(50):
     tokens_per_sec = (train_loader.B * train_loader.T) / dt
 
     print(
-        f"step {i}, "
-        f"loss: {loss.item():.2f}, "
-        f"dt: {dt * 1000:.2f}ms, "
-        f"tok/sec: {tokens_per_sec:.2f}"
+    f"{'Step':>5} | {'Loss':>8} | {'LR':>10} | "
+    f"{'Norm':>8} | {'Time(ms)':>10} | {'Tok/sec':>12}"
+    )
+    print("-" * 70)
+
+    print(
+    f"{step:5d} | "
+    f"{loss.item():8.4f} | "
+    f"{lr:10.2e} | "
+    f"{norm:8.4f} | "
+    f"{dt * 1000:10.2f} | "
+    f"{tokens_per_sec:12,.2f}"
     )
 sys.exit(0)
 
