@@ -161,7 +161,8 @@ class GPT(nn.Module):
 
         return model
 
-# attempt to autodetect the device
+# ---------------------------------------------------------------------------------
+# ATTEMPT TO AUTODETECT THE DEVICE
 device = "cpu"
 if torch.cuda.is_available():
     device = "cuda"
@@ -172,8 +173,24 @@ print(f"using device: {device}")
 num_return_sequences = 5
 max_length = 30
 
-# model = GPT.from_pretrained('gpt2')
 
+# ---------------------------------------------------------------------------------
+# GET A DATA BATCH
+import tiktoken
+enc = tiktoken.get_encoding("gpt2")
+with open('input.txt', 'r') as f:
+    text = f.read()
+text = text[:1000]
+tokens = enc.encode(text)
+B, T = 4, 32
+buf = torch.tensor(tokens[:B*T + 1])
+x = buf[:-1].view(B, T)
+y = buf[1:].view(B, T)
+
+
+# ---------------------------------------------------------------------------------
+# GET LOGITS
+# model = GPT.from_pretrained('gpt2')
 model = GPT(GPTConfig())  # create a new GPT model with the default configuration
 model.eval()  
 model.to(device)
