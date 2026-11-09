@@ -161,6 +161,14 @@ class GPT(nn.Module):
 
         return model
 
+# attempt to autodetect the device
+device = "cpu"
+if torch.cuda.is_available():
+    device = "cuda"
+elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+    device = "mps"
+print("using device: {device}") 
+
 num_return_sequences = 5
 max_length = 30
 
@@ -168,7 +176,7 @@ max_length = 30
 
 model = GPT(GPTConfig())  # create a new GPT model with the default configuration
 model.eval()  
-model.to('cuda')
+model.to(device)
 
 # prefix tokens
 import tiktoken
@@ -179,7 +187,6 @@ tokens = tokens.unsqueeze(0).repeat(num_return_sequences, 1) # (1, 8)
 x = tokens.to('cuda')
 
 # generate! right now x is (B, T)
-
 while x.size(1) < max_length:
     # forward the model to get the logits
     with torch.no_grad():
