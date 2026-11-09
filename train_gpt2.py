@@ -55,7 +55,7 @@ class Block(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.ln_1 = nn.LayerNorm(config.n_embd)
-        self.attn = nn.CausalSelfAttention(config)
+        self.attn = CausalSelfAttention(config)
         self.ln_2 = nn.LayerNorm(config.n_embd)
         self.mlp = MLP(config)
 
@@ -110,7 +110,7 @@ class GPT(nn.Module):
         model = GPT(config)
         sd = model.state_dict()
         sd_keys = sd.keys()
-        sd_keys = [k for k in sd_keys if not k.startswith('.attn.bias')] # remove the attention bias keys
+        sd_keys = [k for k in sd_keys if not k.endswith('.attn.bias')] # remove the attention bias keys
 
         # init a huggingface/transformers model
         model_hf = GPT2LMHeadModel.from_pretrained(model_type)
@@ -118,8 +118,8 @@ class GPT(nn.Module):
 
         # copy while ensuring all of the parameters are aligned
         sd_keys_hf = sd_hf.keys()
-        sd_keys_hf = [k for k in sd_keys_hf if not k.startswith('.attn.masked_bias')] # remove the attention bias keys
-        sd_keys_hf = [k for k in sd_keys_hf if not k.startswith('.attn.bias')] # remove the attention bias keys
+        sd_keys_hf = [k for k in sd_keys_hf if not k.endswith('.attn.masked_bias')] # remove the attention bias keys
+        sd_keys_hf = [k for k in sd_keys_hf if not k.endswith('.attn.bias')] # remove the attention bias keys
 
         transposed = ['attn.c_attn.weight', 'attn.c_proj.weight', 'mlp.c_fc.weight', 'mlp.c_proj.weight']
         # basically the openai checkpoint use a "Conv1D" module, but we only want to use a vanilla linear layer, so we need to transpose the weights when copying them over
