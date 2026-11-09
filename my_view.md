@@ -197,10 +197,29 @@ What I picked up:
 
 ---
 
+## Phase 4 — tuning the training run
+
+The model was reasonably fast by this point. What I hadn't touched yet was whether it trains *well* — learning rate, gradient stability, and optimizer settings. Those aren't speed wins, they're tuning.
+
+### c2c53d3 — learning rate schedule, gradient clipping, and GPT-3 optimizer settings
+
+I added a real learning rate schedule, gradient clipping, and the GPT-3 optimizer hyperparameters. I also made the log line show LR and grad norm instead of just loss and speed.
+
+Why: a constant `3e-4` from step zero is a bad idea. At the start the weights are random, so early gradients are noisy and a full-size step can destabilize things. Near the end, the same big step keeps bouncing around the minimum instead of settling into it. Warmup fixes the first problem, cosine decay fixes the second.
+
+What I picked up:
+- Warmup ramps the LR linearly from near zero to `max_lr` over 10 steps. It gives Adam time to build decent moment estimates before taking big steps.
+- Cosine decay goes from `max_lr` to `min_lr` (10% of max) along a cosine curve. It spends more time at small LRs near the end, which is good for converging.
+- The scheduler is applied after `backward()` and before `optimizer.step()`. PyTorch gets the LR from each param group, so I loop over `optimizer.param_groups` and set `lr` there every step.
+- `clip_grad_norm_` rescales all gradients if their global norm goes above 1.0. This stops one bad batch — especially with bf16 — from blowing up the weights. It returns the norm *before* clipping, which is why logging it is useful: if it keeps sitting at 1.0, clipping is doing real work.
+- `betas=(0.9, 0.95)` is the GPT-3 setting. A lower `beta2` than the usual 0.999 makes the second moment adapt faster to recent gradient variance, which suits large models and larger batches.
+
+---
+
 ## where things stand
 
 - The script trains a randomly initialized GPT-2 124M on Tiny Shakespeare.
-- It runs 50 steps with compile, bf16 autocast, Flash Attention, and tok/s logging, then exits before the generation block.
+- It runs 50 steps with compile, bf16 autocast, Flash Attention, warmup + cosine LR decay, gradient clipping, and tok/s logging, then exits before the generation block.
 - The generation code is still there as a reference. I can reach it by removing `sys.exit(0)`.
 
 ## stuff I want to try next
