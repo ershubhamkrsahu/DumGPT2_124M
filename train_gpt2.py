@@ -85,7 +85,7 @@ class GPT(nn.Module):
         ))
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
 
-    def forward(self, idx):
+    def forward(self, idx, targets=None):
         # idx is of shape (B, T) and represents the token indices in the vocabulary
         B, T = idx.size()
         assert T <= self.config.block_size, f"Cannot forward sequence of length {T}, block size is only {self.config.block_size}"
@@ -101,9 +101,13 @@ class GPT(nn.Module):
 
         # apply the final layer norm
         x = self.transformer.ln_f(x)
-
         logits = self.lm_head(x)  # shape (B, T, vocab_size)
-        return logits
+        
+        loss = None
+        if targets is not None:
+            loss = f.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1))
+        
+        return logits, loss
 
     
     @classmethod
@@ -170,34 +174,35 @@ elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
     device = "mps"
 print(f"using device: {device}") 
 
-num_return_sequences = 5
-max_length = 30
 
 
 # ---------------------------------------------------------------------------------
 # GET A DATA BATCH
 import tiktoken
 enc = tiktoken.get_encoding("gpt2")
-with open('input.txt', 'r') as f:
-    text = f.read()
+with open('input.txt', 'r') as file:
+    text = file.read()
 text = text[:1000]
 tokens = enc.encode(text)
 B, T = 4, 32
 buf = torch.tensor(tokens[:B*T + 1])
-x = buf[:-1].view(B, T)
-y = buf[1:].view(B, T)
+x = buf[:-1].view(B, T).to(device)
+y = buf[1:].view(B, T).to(device)
 
 
 # ---------------------------------------------------------------------------------
 # GET LOGITS
 # model = GPT.from_pretrained('gpt2')
 model = GPT(GPTConfig())  # create a new GPT model with the default configuration
-model.eval()  
 model.to(device)
+logits, loss = model(x, y)
+
+print(loss)
+import sys; sys.exit(0)
 
 # prefix tokens
-import tiktoken
-enc = tiktoken.get_encoding("gpt2")
+num_return_sequences = 5
+max_length = 30
 tokens = enc.encode("Once upon a time, in a land far away, there lived a")
 tokens = torch.tensor(tokens, dtype=torch.long) # (8,)
 tokens = tokens.unsqueeze(0).repeat(num_return_sequences, 1) # (1, 8)
@@ -207,7 +212,7 @@ x = tokens.to(device)
 while x.size(1) < max_length:
     # forward the model to get the logits
     with torch.no_grad():
-        logits = model(x) # (B, T, vocab_size)
+        logits, _ = model(x) # (B, T, vocab_size)
         # focus only on the last time step
         logits = logits[:, -1, :] # becomes (B, vocab_size)
         # apply softmax to get probabilities
