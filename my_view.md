@@ -183,6 +183,18 @@ What I picked up:
 - `is_causal=True` lets the kernel skip the masked-out blocks entirely. PyTorch picks the best backend available for the hardware.
 - Triton is the compiler behind `torch.compile` on Windows. Without it, compiled training just isn't available there.
 
+### 3b4ee32 — padding the vocabulary to 50,304
+
+I changed the vocabulary size from 50,257 to 50,304.
+
+Why: 50,257 is an ugly number that doesn't line up with the sizes the GPU likes. 50,304 is the next multiple of 128, so the embedding and `lm_head` matmuls split evenly into tensor-core/warp tiles instead of leaving a ragged edge. This gave me about a 4% speed boost. The extra 47 rows are dead logits — the loss never touches them and sampling can't pick them.
+
+What I picked up:
+- GPU matmuls are happiest when dimensions are multiples of 128 (or at least 64 or 32). Anything else leaves partial tiles and wasted work at the boundary.
+- When training from scratch, vocab size is basically a free architectural choice, so rounding it up is a cheap win.
+- The padded rows do add a tiny bit of parameter and compute cost, but 47 out of 50,257 is ~0.1%, way less than the waste it removes.
+- Right now I made this change inside `from_pretrained`, so it isn't touching the training path yet — training still builds `GPT(GPTConfig())` with the default 50,257. I need to move it into `GPTConfig` for the speedup to actually apply.
+
 ---
 
 ## where things stand
