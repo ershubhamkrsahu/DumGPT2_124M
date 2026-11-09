@@ -167,3 +167,36 @@ max_length = 30
 model = GPT.from_pretrained('gpt2')
 model.eval()  
 model.to('cuda')
+
+# prefix tokens
+import tiktoken
+enc = tiktoken.get_encoding("gpt2")
+tokens = enc.encode("Once upon a time, in a land far away, there lived a")
+tokens = torch.tensor(tokens, dtype=torch.long) # (8,)
+tokens = tokens.unsqueeze(0).repeat(num_return_sequences, 1) # (1, 8)
+x = tokens.to('cuda')
+
+# generate! right now x is (B, T)
+
+while x.size(1) < max_length:
+    # forward the model to get the logits
+    with torch.no_grad():
+        logits = model(x) # (B, T, vocab_size)
+        # focus only on the last time step
+        logits = logits[:, -1, :] # becomes (B, vocab_size)
+        # apply softmax to get probabilities
+        probs = f.softmax(logits, dim=-1) # (B, vocab_size)
+        # sample from the distribution or take the most likely
+        topk_prob, topk_idx = torch.topk(probs, k=50, dim=-1) # (B, 50)
+        # select a token form top-k probabilities
+        ix = torch.multinomial(topk_prob, num_samples=1) # (B, 1)
+        # gather the corresponding token indices
+        xcol = topk_idx.gather(-1, ix) # (B, 1)
+        # append to the sequence 
+        x = torch.cat((x, xcol), dim=1) # (B, T+1)
+
+# print the generated sequences
+for i in range(num_return_sequences):
+    tokens = x[i, :max_length].tolist()
+    decoded = enc.decode(tokens)
+    print(f"Generated sequence {i+1}: {decoded}")
