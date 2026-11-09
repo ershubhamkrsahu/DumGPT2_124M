@@ -250,7 +250,7 @@ torch.set_float32_matmul_precision('high')
 # model = GPT.from_pretrained('gpt2')
 model = GPT(GPTConfig())  # create a new GPT model with the default configuration
 model.to(device)
-# logits, loss = model(x, y)
+model = torch.compile(model, device_type=device)
 
 # optimizer
 optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)
@@ -263,7 +263,10 @@ for i in range(50):
 
     optimizer.zero_grad(set_to_none=True)
 
-    logits, loss = model(x, y)
+    # use automatic mixed precision training  
+    with torch.autocast(device_type=device, dtype=torch.bfloat16):
+        logits, loss = model(x, y)
+
     loss.backward()
     optimizer.step()
 
