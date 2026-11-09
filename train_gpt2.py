@@ -85,7 +85,7 @@ class GPT(nn.Module):
         ))
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
 
-    def float(self, idx):
+    def forward(self, idx):
         # idx is of shape (B, T) and represents the token indices in the vocabulary
         B, T = idx.size()
         assert T <= self.config.block_size, f"Cannot forward sequence of length {T}, block size is only {self.config.block_size}"
