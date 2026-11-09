@@ -163,7 +163,7 @@ class GPT(nn.Module):
 
         # create a form-scratch initialized minGPT model
 
-        config = GPTConfig(**config_args)
+        config = GPTConfig(vocab_size=50304)    # (optimise) ugly number 50257 -> 50304
         model = GPT(config)
         sd = model.state_dict()
         sd_keys = sd.keys()
