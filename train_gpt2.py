@@ -93,6 +93,9 @@ class GPT(nn.Module):
         ))
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
 
+        # weight sharing scheme (similar tensors tend to have similar probabilities)
+        self.transformer.wte.weight = self.lm_head.weight
+
     def forward(self, idx, targets=None):
         # idx is of shape (B, T) and represents the token indices in the vocabulary
         B, T = idx.size()
