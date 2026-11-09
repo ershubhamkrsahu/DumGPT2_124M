@@ -1,210 +1,200 @@
-# My View — Building DumGPT2 124M
+# my_view
 
-A concept-first log of this project. Each entry covers a meaningful commit: **what** changed, **why** it was needed, and the **idea** behind it. Trivial wiring/typo commits are intentionally folded into the relevant entries instead of getting their own section.
+This is my personal log for DumGPT2 124M. Every time I make a commit that actually teaches me something, I write down what I did, why I did it, and what clicked for me. If a commit was just a typo or a broken import, I don't give it its own entry — I just fold it into whatever entry it belongs to.
 
-> **How to maintain this file:** after each meaningful commit, add one entry below with the commit hash, title, and the three sections. Skip commits that only fix a typo or rewire an import — mention them inside the nearest conceptual entry.
-
----
-
-## Phase 1 — The model
-
-### `f73d110` — Project scaffold
-**What:** Created a `uv`-managed Python 3.12 project with PyTorch, `tiktoken`, and NumPy, plus a `.gitignore` for virtualenvs, caches, checkpoints, and datasets.
-
-**Why:** A reproducible environment first, so every later experiment runs against the same dependency graph. The lockfile pins transitive dependencies, not just the ones written in `pyproject.toml`.
-
-**Concept:** Model weights and raw datasets are large binary artifacts; they belong in storage, not Git. A lockfile is what makes "works on my machine" reproducible.
+The point isn't to document every line. The point is that future me can open this and remember how the whole thing works.
 
 ---
 
-### `3c57cd0` — GPT-2 architecture from scratch
-**What:** Implemented `CausalSelfAttention`, `MLP`, `Block`, `GPTConfig`, and `GPT` in `train_gpt2.py` instead of importing `transformers`.
+## Phase 1 — building the model
 
-**Why:** The goal is to understand GPT-2, not just call it. Writing every tensor shape by hand forces the architecture to make sense.
+### f73d110 — setting up the project
 
-**Concept:**
-- GPT-2 124M = 12 layers, 12 heads, 768 embedding dims, vocabulary 50,257, context 1,024.
-- Attention projects to Q, K, V in one `Linear(768, 3*768)`, then splits the result. Each head has size `768 / 12 = 64`, so tensors become `(B, n_head, T, head_size)`.
-- The causal mask is lower-triangular: position `t` may only attend to positions `<= t`. That is what makes the model autoregressive.
-- The MLP expands 4× (`768 -> 3072 -> 768`) with GELU in between.
-- Each block is pre-LayerNorm with residuals: `x = x + attn(ln_1(x))`, then `x = x + mlp(ln_2(x))`. Residual connections give gradients a direct path to earlier layers.
+I started with a uv-managed Python 3.12 project and added torch, tiktoken, and numpy. I also wrote a proper `.gitignore` before writing any real code.
 
----
+Why: I wanted the environment to be reproducible from day one. `pyproject.toml` only lists the packages I directly use, but `uv.lock` pins the whole dependency tree, so the exact same versions come back later. The `.gitignore` keeps virtualenvs, `__pycache__`, checkpoints, and datasets out of git.
 
-### `5df7188` — Loading pretrained GPT-2 weights
-**What:** Added `GPT.from_pretrained()` for `gpt2`, `gpt2-medium`, `gpt2-large`, and `gpt2-xl`, copying weights from Hugging Face into the custom model.
+What I picked up: model weights and raw data are big binary files, they don't belong in a repo. Lockfiles are what actually make "it works on my machine" reproducible.
 
-**Why:** A known-good checkpoint is the strongest correctness test for a from-scratch implementation. If the architecture or weight mapping is wrong, the outputs will be nonsense.
+### 3c57cd0 — writing GPT-2 from scratch
 
-**Concept:**
-- OpenAI's original checkpoint stores attention/MLP projections as `Conv1D`, whose weight layout is `(in, out)`. PyTorch `Linear` uses `(out, in)`, so those four weight matrices must be transposed when copying.
-- Non-parameter buffers like `attn.bias` / `attn.masked_bias` are excluded, and every remaining key and shape is asserted to match.
-- Loading a checkpoint is not "training"; it is a validation tool. The project later switches back to random initialization because the actual goal is training from scratch.
+I implemented `CausalSelfAttention`, `MLP`, `Block`, `GPTConfig`, and `GPT` myself instead of just importing `transformers`.
 
----
+Why: the whole point of this project is to understand GPT-2. If I just call `GPT2LMHeadModel`, I learn nothing about what's inside it.
 
-### `e5c3b71` — Forward pass
-**What:** Token embedding + position embedding, pass through all blocks, final LayerNorm, then `lm_head` to vocabulary logits. Also set up eval mode, device transfer, and generation constants.
+What I picked up:
+- GPT-2 124M is 12 layers, 12 heads, 768 embedding dims, 50,257 vocab, and 1,024 context.
+- Attention makes Q, K, V with one `Linear(768, 3*768)` and then splits the output three ways. Each head is 64 dims, so the tensors become `(B, n_head, T, head_size)`.
+- The causal mask is lower triangular. Position `t` can only look at positions `<= t`, and that's literally what makes the model autoregressive.
+- The MLP goes 768 → 3072 → 768 with GELU in the middle.
+- Every block is pre-LayerNorm with a residual: `x = x + attn(ln_1(x))`, then `x = x + mlp(ln_2(x))`. The residual is a shortcut for gradients, so deep stacks still train.
 
-*(The accompanying rename of `float` to `forward` is a wiring fix, not a concept — `nn.Module` only calls a method named `forward`.)*
+### 5df7188 — loading the real GPT-2 weights
 
-**Why:** Complete the path from token IDs to next-token scores so the model can actually be run and tested.
+I wrote `GPT.from_pretrained()` so I could copy weights from Hugging Face into my model for `gpt2`, `gpt2-medium`, `gpt2-large`, and `gpt2-xl`.
 
-**Concept:**
-- `wte(idx)` maps `(B, T)` token IDs to `(B, T, 768)`.
-- `wpe(pos)` adds order information. Attention by itself is permutation-invariant, so without positional embeddings the model would see a bag of tokens.
-- Logits have shape `(B, T, vocab_size)`: one score per vocabulary item at every position.
-- During inference the model only needs the final position's logits to predict the next token.
+Why: loading a checkpoint I trust is the best way to check whether my architecture is actually correct. If a shape or a name was wrong, the outputs would be garbage and I'd know immediately.
 
----
+What I picked up:
+- OpenAI's original checkpoint uses `Conv1D`, which stores weights as `(in, out)`. PyTorch `Linear` stores them as `(out, in)`, so `attn.c_attn`, `attn.c_proj`, `mlp.c_fc`, and `mlp.c_proj` all need a transpose when copying.
+- The `attn.bias` and `attn.masked_bias` buffers don't exist in my model, so I filter those keys out.
+- I assert every remaining key and shape before copying. If the counts don't match, I want it to blow up instead of silently loading a half-broken model.
+- This was only ever a correctness check. I go back to random init right after, because the actual goal is training from scratch.
 
-### `05ef05f` — Autoregressive generation
-**What:** Tokenize a prompt, repeatedly take the last-position logits, apply softmax, keep the top 50 probabilities, sample one token, and append it to the sequence.
+### e5c3b71 — the forward pass
 
-**Why:** Generation is the most intuitive way to see whether the model has learned anything, and sampling (rather than always taking the argmax) produces varied text.
+I wired up the full path: token embedding + position embedding, through all the blocks, final LayerNorm, then `lm_head` to get logits. I also set eval mode, moved the model to the device, and set up the generation constants.
 
-**Concept:**
-- Autoregressive decoding feeds the model's own output back as input, one token at a time.
-- `torch.topk` truncates the long tail of unlikely tokens. `torch.multinomial` then samples from the remaining distribution, so the result is stochastic but not nonsensical.
-- `torch.no_grad()` during generation avoids building an unnecessary autograd graph.
+There was also a dumb bug where I named the method `float` instead of `forward`. That one doesn't deserve its own entry — `nn.Module` only calls a method called `forward`, so renaming it was the fix.
 
----
+What I picked up:
+- `wte(idx)` turns `(B, T)` token IDs into `(B, T, 768)`.
+- `wpe(pos)` adds position information. Attention is permutation-invariant on its own, so without this the model would see a bag of tokens and have no idea about order.
+- Logits come out as `(B, T, vocab_size)`. For next-token prediction I only care about the last position.
+- In inference I only need the final logits, not the whole sequence.
 
-## Phase 2 — Training
+### 05ef05f — generating text
 
-### `0748c03` + `dabd799` — Train from scratch, on any device
-**What:** Commented out pretrained loading and initialized `GPT(GPTConfig())` from scratch. Added device autodetection with priority CUDA → MPS → CPU.
+I tokenized a prompt, then looped: take the last position's logits, softmax them, keep the top 50, sample one token, and append it. Repeat until I hit the max length.
 
-**Why:** The project's actual objective is to train a 124M model from random weights. Pretrained GPT-2 remains useful only as a reference. Device detection keeps the same script usable on a GPU, an Apple laptop, or CPU.
+Why: generation is the fastest way to see if the model is learning anything at all, and sampling makes the output varied instead of the same sentence every time.
 
-**Concept:** Model parameters and input batches must live on the same device, otherwise PyTorch raises a device mismatch. Random initialization means the initial loss should be near `ln(vocab_size) ≈ ln(50,257) ≈ 10.8` — a useful sanity check.
+What I picked up:
+- Autoregressive decoding just means feeding the model's own output back into it, one token at a time.
+- Top-k cuts off the long tail of nonsense tokens. `torch.multinomial` then samples from what's left, so results are random but still plausible.
+- `torch.no_grad()` during generation stops autograd from building a graph I'll never use.
 
 ---
 
-### `d509d48` + `1676116` — Dataset and next-token batches
-**What:** Added `dataset_dowload.py` to fetch Tiny Shakespeare, tokenized it with the GPT-2 BPE encoding, and built `x` / `y` batches of shape `(B=4, T=32)`, later `T=1024`.
+## Phase 2 — actually training it
 
-**Why:** Language modeling needs a continuous stream of text and a self-supervised target: the next token. No human labels are required.
+### 0748c03 + dabd799 — training from scratch on any device
 
-**Concept:**
-- `y` is `x` shifted by one position. For every input token, the target is simply the token that came after it.
-- A batch of `B × T` tokens contains `B × T` independent next-token predictions, all processed in parallel.
-- BPE (`tiktoken`, GPT-2 encoding) splits text into subword units. The model never sees characters or words directly, only integer IDs.
-- `input.txt` is ~1.1 MB, roughly 338k tokens — only a few hundred batches per epoch at this batch size.
+I commented out the pretrained load and switched to `GPT(GPTConfig())`, so the model starts from random weights. I also added device detection: CUDA first, then MPS, then CPU.
 
----
+Why: the real goal of the project is to train my own model. The pretrained GPT-2 is just a reference point. Device detection means the same script runs on my GPU, on a Mac, or on CPU without edits.
 
-### `02b8331` — Cross-entropy loss
-**What:** Added an optional `targets` argument to `GPT.forward`, flattened logits and targets, and computed `F.cross_entropy`.
+What I picked up: the model and the data have to be on the same device or PyTorch throws a mismatch error. And when initialization is correct, the very first loss should be around `ln(50,257) ≈ 10.8`. If it isn't, something is wrong before training even starts.
 
-**Why:** This is the training objective. Without a scalar loss there is nothing to backpropagate.
+### d509d48 + 1676116 — Tiny Shakespeare and shifted batches
 
-**Concept:**
-- Cross-entropy measures `-log(probability assigned to the correct token)`. Lower is better; it is the same as the negative log-likelihood of the data under the model.
-- `cross_entropy` expects `(N, num_classes)` scores and `(N,)` targets, hence the `view(-1, vocab_size)` and `view(-1)`.
-- The loss is the average over all `B × T` positions in the batch.
+I added `dataset_dowload.py` to grab Tiny Shakespeare, tokenized it with the GPT-2 BPE encoding, and started making `x`/`y` batches. They started at `B=4, T=32` and later went to `T=1024`.
 
----
+Why: next-token prediction is self-supervised. I don't need labels, I just need a stream of text and the token that comes next.
 
-### `531b76f` + `adfd144` — Training loop and `DataLoaderLite`
-**What:** Added an AdamW optimizer at `lr=3e-4` and a 50-step loop doing zero-grad → forward → backward → step. Replaced the manual slice with `DataLoaderLite`, which streams sequential batches and wraps to the start at the end of the token stream.
+What I picked up:
+- `y` is just `x` shifted by one. Every input token's target is whatever followed it in the text.
+- One batch of `B × T` tokens gives me `B × T` predictions in parallel.
+- BPE splits text into subwords, so the model never sees characters or whole words, only token IDs.
+- Tiny Shakespeare is only ~1.1 MB, roughly 338k tokens, so an epoch is just a few hundred batches at this batch size.
 
-**Why:** Start with the simplest correct training loop, and keep data handling deterministic so experiments are easy to reason about.
+### 02b8331 — cross-entropy loss
 
-**Concept:**
-- AdamW keeps per-parameter first and second moment estimates, giving each parameter an adaptive effective learning rate. Its "W" means weight decay is decoupled from the gradient update.
-- Correct order matters: clear old gradients, recompute them, then update parameters.
-- Sequential batches preserve long stretches of context and make runs reproducible. Random sampling would be better for generalization later, but adds complexity now.
-- The buffer slice is `B*T + 1` long because targets need one extra token beyond the inputs.
+I added an optional `targets` argument to `forward` and computed `F.cross_entropy` over the flattened logits and targets.
 
----
+Why: without a scalar loss there's nothing to backpropagate. This is the entire training objective.
 
-### `8b1963e` — Weight tying
-**What:** Reused `transformer.wte.weight` as `lm_head.weight`.
+What I picked up:
+- Cross-entropy is `-log(probability of the correct token)`. Lower is better, and it's the same thing as negative log-likelihood.
+- `cross_entropy` wants `(N, num_classes)` scores and `(N,)` targets, which is why I flatten with `view(-1, vocab_size)` and `view(-1)`.
+- The reported loss is the average over all `B × T` positions in the batch.
 
-**Why:** GPT-2 ties input and output embeddings. It reduces parameter count and couples a token's representation with the scores it produces as a prediction.
+### 531b76f + adfd144 — training loop and DataLoaderLite
 
-**Concept:**
-- `wte` maps token ID → vector; `lm_head` maps vector → logits over the vocabulary. Tying them means the same matrix is used in both directions.
-- A token whose input embedding is similar to the current hidden state naturally receives a higher output logit, so semantically related tokens influence each other.
-- This is part of how GPT-2 124M reaches ~124M parameters. Without tying, `lm_head` alone would add ~38.6M duplicate parameters.
+I set up AdamW at `lr=3e-4` and a 50-step loop: zero grad, forward, backward, step. Then I replaced the manual slicing with `DataLoaderLite`, which walks through the token stream in order and wraps back to the start at the end.
 
----
+Why: I wanted the simplest correct loop first. Sequential batches also keep the data deterministic, which makes it way easier to compare runs.
 
-### `73a8cbf` — Weight initialization and residual scaling
-**What:** Initialize Linear/Embedding weights from `N(0, 0.02)`, zero all biases, and scale the `c_proj` layers in attention and MLP by `(2 * n_layer)^-0.5`.
+What I picked up:
+- AdamW keeps a running first and second moment for every parameter, so each one gets its own adaptive step size. The "W" means weight decay is decoupled from the gradient update.
+- Order matters: clear old grads, compute new ones, then update.
+- I slice `B*T + 1` tokens because the targets need one token beyond the inputs.
+- Sequential data preserves long-range context and is reproducible. Random sampling would generalize better, but that's a later problem.
 
-**Why:** Deep residual networks are sensitive to initialization. This is GPT-2's recipe for keeping activations and gradients stable at depth.
+### 8b1963e — tying the embeddings
 
-**Concept:**
-- Every residual branch adds its output to the residual stream. If each branch contributes unit-scale noise, the stream's variance grows with depth.
-- Scaling the projection that writes back into the residual stream by `1/sqrt(2 * n_layer)` keeps the accumulated variance roughly constant. The factor `2` accounts for the two branches (attention and MLP) per block.
-- Zeroing biases is safe because LayerNorm follows and because there is no symmetry-breaking role for biases here.
+I pointed `transformer.wte.weight` and `lm_head.weight` at the same tensor.
 
----
+Why: GPT-2 does it, it cuts parameters, and it ties a token's input representation to the scores it produces as an output.
 
-## Phase 3 — Making it fast
+What I picked up:
+- `wte` goes token ID → vector. `lm_head` goes vector → vocabulary scores. Tying them means one matrix does both jobs.
+- If a token's embedding is close to the current hidden state, that token naturally gets a higher score. Related tokens end up influencing each other.
+- This is part of how GPT-2 counts as 124M params. Without tying, `lm_head` alone would add ~38.6M duplicates.
 
-### `a06d052` — Full context, TF32, and throughput measurement
-**What:** Raised `T` from 32 to 1,024 (GPT-2's full context), enabled TF32 matmuls with `torch.set_float32_matmul_precision('high')`, and logged step time plus tokens/second.
+### 73a8cbf — initialization and residual scaling
 
-**Why:** Training at `T=32` does not exercise the real cost profile. Attention is quadratic in sequence length, so realistic context is where optimization matters. Measuring first gives a baseline.
+I initialized Linear and Embedding weights from `N(0, 0.02)`, zeroed all biases, and scaled the `c_proj` layers by `(2 * n_layer)^-0.5`.
 
-**Concept:**
-- Attention cost is `O(T²)` in time and memory per head; at `T=1024` that is a 1024×1024 score matrix per head.
-- TF32 is a tensor-core format with an 8-bit exponent (same range as FP32) and a 10-bit mantissa. On NVIDIA Ampere and newer it speeds up FP32 matmuls with negligible quality impact for training.
-- Tokens/second (`B * T / dt`) is a better hardware-utilization metric than steps/second, because it normalizes for batch size and context length.
+Why: deep residual nets are really sensitive to init. This is GPT-2's recipe for keeping activations and gradients under control at depth.
+
+What I picked up:
+- Every residual branch dumps its output into the residual stream. If each one contributes unit-scale noise, the variance grows with depth.
+- Scaling the projection that writes back into the stream by `1/sqrt(2 * n_layer)` keeps that growth roughly constant. The 2 is because each block has two branches, attention and MLP.
+- Zero biases are fine here because LayerNorm comes right after and there's no symmetry to break.
 
 ---
 
-### `a2c40fb` — Honest timing and cheaper gradient clearing
-**What:** Added `torch.cuda.synchronize()` around the timed region and switched `optimizer.zero_grad()` to `set_to_none=True`.
+## Phase 3 — making it fast
 
-**Why:** The first timing change makes measurements real; the second removes unnecessary memory traffic.
+### a06d052 — full context, TF32, and tok/s
 
-**Concept:**
-- CUDA kernel launches are asynchronous. Without `synchronize()`, the host measures only how long it took to enqueue work, not how long the GPU actually ran.
-- By default `zero_grad()` writes zeros into every gradient tensor. `set_to_none=True` drops the tensors instead, so the allocator can reuse that memory, and the backward pass can allocate fresh gradients only where needed.
+I bumped `T` from 32 to 1,024, turned on TF32 with `torch.set_float32_matmul_precision('high')`, and started logging step time and tokens per second.
+
+Why: training at `T=32` doesn't look anything like real GPT-2 training. Attention is quadratic in sequence length, so the full context is where things actually get expensive. Measure first, optimize second.
+
+What I picked up:
+- Attention is `O(T²)` in both time and memory per head. At `T=1024` that's a 1024×1024 score matrix per head.
+- TF32 has the same exponent range as FP32 but only a 10-bit mantissa. On Ampere and newer it speeds up FP32 matmuls with basically no quality hit for training.
+- Tokens per second (`B*T/dt`) is a better metric than steps per second because it accounts for batch size and context length.
+
+### a2c40fb — timing that actually means something
+
+I put `torch.cuda.synchronize()` around the timed section and switched `optimizer.zero_grad()` to `set_to_none=True`.
+
+Why: my timing was lying to me, and I was doing unnecessary memory work every step.
+
+What I picked up:
+- CUDA launches are asynchronous. Without `synchronize()`, I'm timing how long it takes to queue the work, not how long the GPU runs.
+- `zero_grad()` normally writes zeros into every gradient. `set_to_none=True` throws the tensors away instead, so the allocator can reuse that memory and backward only allocates what it needs.
+
+### 495f740 — torch.compile and bf16 autocast
+
+I wrapped the model in `torch.compile()` and ran the forward pass inside `torch.autocast(..., dtype=torch.bfloat16)`. I also added `utils/check_gpu.py` to see what my GPU actually supports.
+
+Why: eager PyTorch launches a ton of tiny kernels and pays Python overhead for each op. Compiling and using mixed precision are the two biggest wins I can get before touching the algorithm.
+
+What I picked up:
+- `torch.compile` traces the model into a graph, fuses elementwise ops, and generates faster kernels. The first step is slow because it's compiling.
+- Autocast runs matmuls and similar ops in bfloat16, but keeps sensitive ops and master weights in FP32.
+- bfloat16 has the same exponent range as FP32, so it doesn't need the loss scaling that FP16 does. It just gives up mantissa bits for speed and memory.
+- Compiling on Windows needs Triton, which is why I added it in the next commit.
+
+### 2615b27 — Flash Attention
+
+I replaced my manual attention with `F.scaled_dot_product_attention(q, k, v, is_causal=True)`, simplified `torch.compile` to `mode="default"`, and added `triton-windows`.
+
+Why: my version materializes the whole `(B, n_head, T, T)` attention matrix. At `T=1024` that's a huge memory cost and a lot of slow reads and writes to GPU memory. Flash Attention gets the same answer without ever writing that matrix out.
+
+What I picked up:
+- Normal attention needs `O(T²)` memory per head for the scores, and softmax forces them out to high-bandwidth memory and back.
+- Flash Attention tiles Q, K, V into blocks that fit in SRAM, computes attention block by block, and uses an online softmax to combine the pieces. Memory drops to `O(T)`, and backward recomputes tiles instead of storing them.
+- The math is exact. It's the same attention, just a different order of operations and way less memory traffic.
+- `is_causal=True` lets the kernel skip the masked-out blocks entirely. PyTorch picks the best backend available for the hardware.
+- Triton is the compiler behind `torch.compile` on Windows. Without it, compiled training just isn't available there.
 
 ---
 
-### `495f740` — `torch.compile` and bfloat16 autocast
-**What:** Wrapped the model in `torch.compile()` and ran the forward pass inside `torch.autocast(device_type, dtype=torch.bfloat16)`. Also added `utils/check_gpu.py` to inspect hardware.
-
-**Why:** The default eager-mode PyTorch execution launches many small kernels and pays Python overhead per operation. Compilation and mixed precision are the two biggest wins available before changing the algorithm.
-
-**Concept:**
-- `torch.compile` traces the model into a graph, fuses elementwise operations, and generates optimized kernels. The first step is slow (compilation); later steps are faster.
-- Autocast runs eligible ops (matmuls, convolutions) in bfloat16 while keeping sensitive ops and master weights in FP32.
-- bfloat16 has the same exponent range as FP32, so it does not need loss scaling the way FP16 does. It trades mantissa precision for speed and memory.
-- Compilation on Windows requires Triton, which is why the dependency was added in the next commit.
-
----
-
-### `2615b27` — Flash Attention
-**What:** Replaced the hand-written attention with `F.scaled_dot_product_attention(q, k, v, is_causal=True)`. Simplified `torch.compile` to `mode="default"` and added `triton-windows`.
-
-**Why:** The manual version materializes a full `(B, n_head, T, T)` attention matrix, which at `T=1024` is both a memory bottleneck and a lot of slow reads/writes to GPU memory. Flash Attention computes the same result without ever writing that matrix out.
-
-**Concept:**
-- Standard attention needs `O(T²)` memory per head for the score matrix, and the softmax forces a round trip to high-bandwidth memory.
-- Flash Attention tiles Q, K, and V into blocks that fit in SRAM, computes attention block by block, and uses an online softmax to combine partial results. Memory drops to `O(T)`, and the backward pass recomputes tiles instead of storing them.
-- The math is exact, not an approximation — only the order of operations and memory movement change.
-- `is_causal=True` lets the kernel skip masked-out blocks entirely. PyTorch's SDPA picks the best available backend (Flash, memory-efficient, or math) for the hardware.
-- Triton is the kernel compiler behind `torch.compile` on Windows; without it, compiled training is unavailable on this platform.
-
----
-
-## Current state
+## where things stand
 
 - The script trains a randomly initialized GPT-2 124M on Tiny Shakespeare.
-- Training runs for 50 steps, with compile, bf16 autocast, Flash Attention, and throughput logging, then exits before the generation block.
-- The generation code remains as a reference/debug path and can be reached by removing `sys.exit(0)`.
+- It runs 50 steps with compile, bf16 autocast, Flash Attention, and tok/s logging, then exits before the generation block.
+- The generation code is still there as a reference. I can reach it by removing `sys.exit(0)`.
 
-## Things to explore next
+## stuff I want to try next
 
-- Add evaluation: measure validation loss on a held-out split instead of only training loss.
-- Add checkpoint saving/resuming, including optimizer state.
-- Scale to gradient accumulation and distributed data parallel for larger effective batches.
-- Implement a proper learning-rate schedule (warmup + cosine decay) and gradient clipping.
-- Feed real data into generation after training so samples can be inspected.
+- Evaluate on a held-out split instead of only watching training loss.
+- Save and resume checkpoints, including optimizer state.
+- Gradient accumulation and distributed training to get bigger effective batches.
+- A real LR schedule with warmup and cosine decay, plus gradient clipping.
+- Generate samples after training so I can actually read what the model learned.
