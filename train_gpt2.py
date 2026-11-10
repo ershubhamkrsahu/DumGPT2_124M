@@ -316,7 +316,9 @@ class DataLoaderLite:
         assert len(shards) > 0, f"no shards found for split {split}"
         if master_process:
             print(f"found {len(shards)} shards of {split} data")
+        self.reset()
 
+    def reset(self):
         # state, init at shard zero
         self.current_shard = 0
         self.tokens = load_tokens(self.shards[self.current_shard])
@@ -405,6 +407,15 @@ train_loader = DataLoaderLite(
     split='train'
 )
 
+val_loader = DataLoaderLite(
+    B=B,
+    T=T,
+    device=device,
+    process_rank=ddp_rank,
+    num_processes=ddp_world_size,
+    split='val'
+)
+
 # Set the preferred float32 matrix multiplication precision.
 torch.set_float32_matmul_precision('high')
 
@@ -458,6 +469,64 @@ optimizer = raw_model.configure_optimizers(
 for step in range(max_steps):
     torch.cuda.synchronize()
     t0 = time.time()
+    
+    # once in a while evaluate our validation loss
+    if step % 100 == 0:
+        model.eval()
+        val_loader.reset()
+        with torch.no_grad():
+            val_loss_accum = 0.0
+            val_loss_steps = 20
+            for _ in range(val_loss_steps):
+                x, y = val_loader.next_batch()
+                x, y = x.to(device), y.to(device)
+                with torch.autocast(device_type=device, dtype=torch.bfloat16):
+                    logits, loss = model(x, y)
+                loss = loss / val_loss_steps
+                val_loss_accum += loss.detach()
+        if ddp:
+            dist.all_reduce(val_loss_accum, op=dist.ReduceOp.AVG)
+        if master_process:
+            print(f"validation loss: {val_loss_accum.item():.4f}")
+
+    # once in a while generate from the model (except step 0, which is noise)
+    # disabled because torch.compile throws error 
+    # if torch.compile disabled, this code works fine
+    if step > 0 and step % 100 == 0 and False:
+        model.eval()
+        num_return_sequences = 4
+        max_length = 30
+        tokens = enc.encode("Once upon a time, in a land far away, there lived a")
+        tokens = torch.tensor(tokens, dtype=torch.long)  # (sequence_length,)
+        tokens = tokens.unsqueeze(0).repeat(num_return_sequences, 1)
+        xgen = tokens.to(device)
+        sample_rng = torch.Generator(device=device)
+        sample_rng.manual_seed(42 + ddp_rank)
+
+        # Generate tokens autoregressively until max_length is reached.
+        while xgen.size(1) < max_length:
+            # forward the model to get the logits
+            with torch.no_grad():
+                logits, loss = model(xgen)
+                logits = logits[:, -1, :]  # Use logits from the final sequence position.
+                probs = f.softmax(logits, dim=-1) # get the probabilities
+
+                # Sample from the top 50 most likely next tokens.
+                topk_prob, topk_idx = torch.topk(probs, k=50, dim=-1)
+                ix = torch.multinomial(topk_prob, num_samples=1, generator=sample_rng)
+                xcol = topk_idx.gather(topk_idx, -1, ix)
+
+                # Append the sampled token to each sequence.
+                xgen = torch.cat((xgen, xcol), dim=1)
+
+        # Decode and print the generated sequences.
+        for i in range(num_return_sequences):
+            tokens = xgen[i, :max_length].tolist()
+            decoded = enc.decode(tokens)
+            print(f"Rank {ddp_rank}: Generated sequence {i+1}: {decoded}")
+
+    # training loop
+    model.train()
     optimizer.zero_grad(set_to_none=True)
     loss_accum = 0.0
 
@@ -508,40 +577,3 @@ for step in range(max_steps):
         )
 if ddp:
     dist.destroy_process_group()
-
-# Exit after training. The generation example below is retained as in the
-# original file, but is not reached while this sys.exit(0) remains here.
-sys.exit(0)
-
-# =============================================================================
-# TEXT GENERATION (CURRENTLY UNREACHED)
-# =============================================================================
-# Prefix tokens
-num_return_sequences = 5
-max_length = 30
-tokens = enc.encode("Once upon a time, in a land far away, there lived a")
-tokens = torch.tensor(tokens, dtype=torch.long)  # (sequence_length,)
-tokens = tokens.unsqueeze(0).repeat(num_return_sequences, 1)
-x = tokens.to(device)
-
-# Generate tokens autoregressively until max_length is reached.
-while x.size(1) < max_length:
-    # forward the model to get the logits
-    with torch.no_grad():
-        logits, _ = model(x)
-        logits = logits[:, -1, :]  # Use logits from the final sequence position.
-        probs = f.softmax(logits, dim=-1)
-
-        # Sample from the top 50 most likely next tokens.
-        topk_prob, topk_idx = torch.topk(probs, k=50, dim=-1)
-        ix = torch.multinomial(topk_prob, num_samples=1)
-        xcol = topk_idx.gather(-1, ix)
-
-        # Append the sampled token to each sequence.
-        x = torch.cat((x, xcol), dim=1)
-
-# Decode and print the generated sequences.
-for i in range(num_return_sequences):
-    tokens = x[i, :max_length].tolist()
-    decoded = enc.decode(tokens)
-    print(f"Generated sequence {i+1}: {decoded}")
