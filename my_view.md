@@ -268,16 +268,51 @@ What I picked up:
 
 ---
 
+## Phase 6 — real data
+
+### f8ea8e2 + 4fb187d — FineWeb-Edu, token shards, and getting data out of git
+
+I replaced Tiny Shakespeare with FineWeb-Edu. I wrote `fineweb_edu.py` to stream the dataset, tokenize it, and write binary shards, then rewrote `DataLoaderLite` to read those shards instead of `input.txt`. I also stopped tracking `input.txt` and ignored the shard directory, so only the scripts live in git now.
+
+Why: Tiny Shakespeare is about 1 MB, roughly 338k tokens. A 124M-parameter model can basically memorize that, and the loss would look great while meaning almost nothing. To train something that actually generalizes I need billions of tokens. FineWeb-Edu is open, high quality, and already used by nanoGPT-style runs, so it was the obvious step up.
+
+**Where this data actually comes from:**
+- **Common Crawl** is a nonprofit that crawls the public web every month and publishes raw WARC archives of the pages. It is not a clean dataset — it's just a huge pile of HTML.
+- **FineWeb** (from Hugging Face) processes those crawls: extracts text from HTML, identifies the language, applies quality heuristics (Gopher/C4-style rules), deduplicates with MinHash, and scrubs PII.
+- **FineWeb-Edu** adds one more stage: a classifier scores each page for educational value and keeps the high-scoring ones. The full dataset is ~1.3T tokens; the `sample-10BT` config I'm using is a 10B-token sample of it.
+- So the chain is: Common Crawl → extracted and filtered web text → educational classifier → FineWeb-Edu → GPT-2 tokenizer → uint16 shards → training batches.
+
+**How my pipeline works:**
+- I stream the HF dataset instead of downloading all the raw text first.
+- Each document is tokenized with GPT-2 BPE, with an EOT token prepended so the model can tell where one document ends and the next begins.
+- Tokens are packed into 100M-token shards and stored as `uint16`. The GPT-2 vocabulary is 50,257, which fits comfortably below 65,536, so two bytes per token is enough and cuts storage in half compared to `int32`.
+- 100 shards came out to about 18.5 GiB. Shard 0 is validation and the other 99 are training data.
+- `DataLoaderLite` keeps only one shard in RAM at a time, slices `B*T + 1` tokens from it, and moves to the next shard when it runs out. It never holds the whole dataset.
+- `input.txt` is now untracked and ignored, along with `edu_fineweb10B/`. The scripts are versioned; the data is not.
+
+What I picked up:
+- Raw Common Crawl is not training data. Most of the work in a real dataset is extraction, filtering, and dedup, not modeling.
+- Quality filtering matters more than raw volume, especially for smaller models. A smaller clean dataset beats a giant noisy one.
+- Tokenize once and store integers. Re-tokenizing text every epoch would be a huge waste of CPU.
+- `uint16` is a nice fit here because the vocabulary is small enough. It halves the bytes per token versus `int32`.
+- Sharding keeps RAM bounded and lets training stream from disk. The tradeoff is a stall whenever I switch shards; later I'd prefetch the next shard in the background.
+- EOT tokens matter. Without them, the model would read unrelated web pages as one continuous document.
+- Reality check on the schedule: 19,073 steps at a 32,768-token batch is only ~625M tokens, not the full 10B. nanoGPT's 19,073 assumes a ~524k-token effective batch. So right now I'm seeing roughly 6% of the sample unless I raise the effective batch size.
+
+---
+
 ## where things stand
 
-- The script trains a randomly initialized GPT-2 124M on Tiny Shakespeare.
-- It runs 50 steps with compile, bf16 autocast, Flash Attention, gradient accumulation to a 32k-token effective batch, warmup + cosine LR decay, gradient clipping, fused AdamW with decay/no-decay groups, and tok/s logging, then exits before the generation block.
+- The script trains a randomly initialized GPT-2 124M on shards from the FineWeb-Edu `sample-10BT` dataset.
+- The dataset is tokenized into 100 `uint16` shards under `edu_fineweb10B/` (~18.5 GiB): shard 0 is validation, the rest are training. The shards and `input.txt` are ignored by git.
+- It runs up to 19,073 steps with compile, bf16 autocast, Flash Attention, gradient accumulation to a 32k-token effective batch, warmup + cosine LR decay, gradient clipping, fused AdamW with decay/no-decay groups, and tok/s logging, then exits before the generation block.
 - DDP scaffolding is in the file but parked — the single-GPU path is what actually runs today.
 - The generation code is still there as a reference. I can reach it by removing `sys.exit(0)`.
 
 ## stuff I want to try next
 
-- Evaluate on a held-out split instead of only watching training loss.
+- Evaluate on the validation shard instead of only watching training loss.
+- Prefetch the next shard in the background so disk reads don't stall the GPU.
 - Save and resume checkpoints, including optimizer state.
 - Get the DDP path working on a machine with more than one GPU.
 - Tune weight decay and the max learning rate further.
