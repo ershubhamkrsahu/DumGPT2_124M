@@ -1,86 +1,153 @@
+"""
+DumGPT - GPT-2 style language model training.
+
+This script keeps the original training structure:
+- Custom GPT model
+- FineWeb-Edu binary shards
+- AdamW optimizer
+- Learning-rate warmup + cosine decay
+- Mixed precision
+- Gradient accumulation
+- Optional multi-GPU DDP
+- HellaSwag evaluation
+- Checkpoints and training graphs
+
+Single GPU:
+    python train_gpt2.py --max-steps 100
+
+Two GPUs:
+    torchrun --standalone --nproc_per_node=2 train_gpt2.py
+
+Resume:
+    python train_gpt2.py --resume checkpoints/latest.pt
+"""
+
 # =============================================================================
 # IMPORTS
 # =============================================================================
+
 from dataclasses import dataclass
+import argparse
+import csv
+import inspect
 import math
+import os
+import random
+import time
+from pathlib import Path
+
+import numpy as np
 import torch
 import torch.nn as nn
-from torch.nn import functional as f
-import tiktoken
-import sys
-import time
-import math
-import inspect
-import numpy as np
+from torch.nn import functional as F
 
 # Distributed training (DDP)
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
-import os
+
+# HellaSwag helpers are kept in your existing separate script.
+from hellaswag import iterate_examples, render_example, get_most_likely_row, evaluate_hellaswag
+
+
+# =============================================================================
+# CONFIGURATION
+# =============================================================================
+
+DATA_DIR = Path(__file__).resolve().parent / "edu_fineweb10B"
+CHECKPOINT_DIR = Path(__file__).resolve().parent / "checkpoints"
+OUTPUT_DIR = Path(__file__).resolve().parent / "outputs"
+
+# Model configuration: GPT-2 124M.
+BLOCK_SIZE = 1024
+VOCAB_SIZE = 50304
+N_LAYER = 12
+N_HEAD = 12
+N_EMBD = 768
+
+# Training configuration.
+# These are conservative defaults for a 4 GB laptop GPU.
+TOTAL_BATCH_SIZE = 8192
+B = 1
+T = 512
+
+MAX_LR = 6e-4
+MIN_LR = MAX_LR * 0.1
+WARMUP_STEPS = 715
+MAX_STEPS = 19073
+WEIGHT_DECAY = 0.1
+
+# Evaluation and checkpoint frequency.
+VAL_INTERVAL = 250
+VAL_STEPS = 10
+HELLASWAG_INTERVAL = 0       # 0 disables periodic HellaSwag evaluation.
+HELLASWAG_MAX_EXAMPLES = 500
+SAVE_INTERVAL = 500
+SAMPLE_INTERVAL = 500
+
+# Gradient checkpointing saves VRAM at the cost of extra computation.
+USE_GRADIENT_CHECKPOINTING = True
+
 
 # =============================================================================
 # TOKENIZER
 # =============================================================================
+
+import tiktoken
 enc = tiktoken.get_encoding("gpt2")
+
 
 # =============================================================================
 # MODEL COMPONENTS
 # =============================================================================
+
+@dataclass
+class GPTConfig:
+    block_size: int = BLOCK_SIZE
+    vocab_size: int = VOCAB_SIZE
+    n_layer: int = N_LAYER
+    n_head: int = N_HEAD
+    n_embd: int = N_EMBD
+
 
 class CausalSelfAttention(nn.Module):
 
     def __init__(self, config):
         super().__init__()
         assert config.n_embd % config.n_head == 0
-        # Project the input into query, key, and value tensors in one operation.
-        self.c_attn = nn.Linear(config.n_embd, 3 * config.n_embd)
 
-        # Output projection.
+        # Project input into query, key, and value in one operation.
+        self.c_attn = nn.Linear(config.n_embd, 3 * config.n_embd)
         self.c_proj = nn.Linear(config.n_embd, config.n_embd)
         self.c_proj.DUMGPT_SCALE_INIT = 1
 
-        # Attention dimensions.
         self.n_head = config.n_head
         self.n_embd = config.n_embd
-        # Causal mask: each position can attend only to itself and earlier positions.
-        self.register_buffer(
-            "bias",
-            torch.tril(torch.ones(config.block_size, config.block_size)).view(
-                1, 1, config.block_size, config.block_size
-            ),
-        )
 
     def forward(self, x):
-        B, T, C = x.size()  # batch size, sequence length, embedding dimension
+        B, T, C = x.size()
 
-        # Compute Q, K, and V, then split the embedding dimension into heads.
         qkv = self.c_attn(x)
         q, k, v = qkv.split(self.n_embd, dim=2)
+
+        # Split embedding dimension into attention heads.
         k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
         q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
         v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
-        # Each tensor now has shape: (B, num_heads, T, head_size).
-        
-        # Reference implementation: explicitly materializes the attention matrix.
-        # Kept here for comparison; the optimized SDPA implementation is used below.
-        # att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
-        # att = att.masked_fill(self.bias[:,:,:T,:T] == 0, float('-inf'))
-        # att = f.softmax(att, dim=-1)
-        # y = att @ v # (B, nh, T, hs)
 
-        # efficient attention using Flash Attention CUDA kernels
-        y = f.scaled_dot_product_attention(q, k, v, is_causal=True)
-        
-        y = y.transpose(1, 2).contiguous().view(B, T, C) # re-assemble all head outputs side by side
+        # PyTorch SDPA automatically uses an efficient attention kernel when available.
+        y = F.scaled_dot_product_attention(q, k, v, is_causal=True)
+
+        y = y.transpose(1, 2).contiguous().view(B, T, C)
         y = self.c_proj(y)
         return y
-    
+
+
 class MLP(nn.Module):
 
     def __init__(self, config):
         super().__init__()
         self.c_fc = nn.Linear(config.n_embd, 4 * config.n_embd)
-        self.gelu = nn.GELU(approximate='tanh')
+        self.gelu = nn.GELU(approximate="tanh")
         self.c_proj = nn.Linear(4 * config.n_embd, config.n_embd)
         self.c_proj.DUMGPT_SCALE_INIT = 1
 
@@ -89,6 +156,7 @@ class MLP(nn.Module):
         x = self.gelu(x)
         x = self.c_proj(x)
         return x
+
 
 class Block(nn.Module):
 
@@ -104,16 +172,10 @@ class Block(nn.Module):
         x = x + self.mlp(self.ln_2(x))
         return x
 
+
 # =============================================================================
-# GPT CONFIGURATION AND MODEL
+# GPT MODEL
 # =============================================================================
-@dataclass
-class GPTConfig:
-    block_size: int = 1024
-    vocab_size: int = 50257
-    n_layer: int = 12
-    n_head: int = 12
-    n_embd: int = 768
 
 class GPT(nn.Module):
 
@@ -122,158 +184,76 @@ class GPT(nn.Module):
         self.config = config
 
         self.transformer = nn.ModuleDict(dict(
-            wte = nn.Embedding(config.vocab_size, config.n_embd),
-            wpe = nn.Embedding(config.block_size, config.n_embd),
-            h = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
-            ln_f = nn.LayerNorm(config.n_embd),
+            wte=nn.Embedding(config.vocab_size, config.n_embd),
+            wpe=nn.Embedding(config.block_size, config.n_embd),
+            h=nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
+            ln_f=nn.LayerNorm(config.n_embd),
         ))
+
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
 
-        # Tie token embeddings and the language-model output projection weights.
+        # Tie token embeddings and output projection weights.
         self.transformer.wte.weight = self.lm_head.weight
 
-        # Initialize model parameters.
         self.apply(self._init_weights)
 
     def _init_weights(self, module):
         if isinstance(module, nn.Linear):
             std = 0.02
-            if hasattr(module, 'DUMGPT_SCALE_INIT'):
+            if hasattr(module, "DUMGPT_SCALE_INIT"):
                 std *= (2 * self.config.n_layer) ** -0.5
             torch.nn.init.normal_(module.weight, mean=0.0, std=std)
             if module.bias is not None:
                 torch.nn.init.zeros_(module.bias)
+
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
     def forward(self, idx, targets=None):
-        # idx contains token IDs and has shape (batch_size, sequence_length).
         B, T = idx.size()
-        assert T <= self.config.block_size, (
-            f"Cannot forward sequence of length {T}, "
-            f"block size is only {self.config.block_size}"
-        )
+        assert T <= self.config.block_size
 
-        # Add token embeddings and positional embeddings.
-        pos = torch.arange(0, T, dtype=torch.long, device=idx.device)  # shape (T,)
-        pos_emb = self.transformer.wpe(pos)  # shape (T, n_embd)
-        tok_emb = self.transformer.wte(idx)  # shape (B, T, n_embd)
+        pos = torch.arange(0, T, dtype=torch.long, device=idx.device)
+        tok_emb = self.transformer.wte(idx)
+        pos_emb = self.transformer.wpe(pos)
         x = tok_emb + pos_emb
 
-        # forward the transformer blocks
+        # Gradient checkpointing trades a little speed for lower VRAM usage.
         for block in self.transformer.h:
-            x = block(x)
+            if USE_GRADIENT_CHECKPOINTING and self.training and x.requires_grad:
+                from torch.utils.checkpoint import checkpoint
+                x = checkpoint(block, x, use_reentrant=False)
+            else:
+                x = block(x)
 
-        # apply the final layer norm
         x = self.transformer.ln_f(x)
-        logits = self.lm_head(x)  # shape (B, T, vocab_size)
-        
+        logits = self.lm_head(x)
+
         loss = None
         if targets is not None:
-            loss = f.cross_entropy(
-                logits.view(-1, logits.size(-1)),
-                targets.view(-1),
+            loss = F.cross_entropy(
+                logits.reshape(-1, logits.size(-1)),
+                targets.reshape(-1),
             )
-        
+
         return logits, loss
-    
-    @classmethod
-    def from_pretrained(cls, model_type):
-        """Loads a pretrained GPT model from the Hugging Face model hub."""
-        assert model_type in [
-            "gpt2",
-            "gpt2-medium",
-            "gpt2-large",
-            "gpt2-xl",
-        ], "Invalid model type. Choose from 'gpt2', 'gpt2-medium', 'gpt2-large', or 'gpt2-xl'."
-
-        from transformers import GPT2LMHeadModel, GPT2Config
-        print(f"Loading pretrained model: {model_type}")
-
-        # Architecture dimensions for each supported GPT-2 model size.
-        config_args = {
-            'gpt2': dict({'n_layer': 12, 'n_head': 12, 'n_embd': 768}),
-            'gpt2-medium': dict({'n_layer': 24, 'n_head': 16, 'n_embd': 1024}),
-            'gpt2-large': dict({'n_layer': 36, 'n_head': 20, 'n_embd': 1280}),
-            'gpt2-xl': dict({'n_layer': 48, 'n_head': 25, 'n_embd': 1600}),
-        }[model_type]
-
-        config_args['vocab_size'] = 50257  # GPT-2 models have a vocab size
-        config_args['block_size'] = 1024  # GPT-2 models have a block size
-
-        # create a form-scratch initialized minGPT model
-
-        config = GPTConfig(vocab_size=50304)    # (optimise) ugly_number 50257 -> 50304
-        model = GPT(config)
-        sd = model.state_dict()
-        sd_keys = sd.keys()
-        sd_keys = [k for k in sd_keys if not k.endswith('.attn.bias')] # remove the attention bias keys
-
-        # init a huggingface/transformers model
-        model_hf = GPT2LMHeadModel.from_pretrained(model_type)
-        sd_hf = model_hf.state_dict()
-
-        # copy while ensuring all of the parameters are aligned
-        sd_keys_hf = sd_hf.keys()
-        sd_keys_hf = [k for k in sd_keys_hf if not k.endswith('.attn.masked_bias')] # remove the attention bias keys
-        sd_keys_hf = [k for k in sd_keys_hf if not k.endswith('.attn.bias')] # remove the attention bias keys
-
-        transposed = ['attn.c_attn.weight', 'attn.c_proj.weight', 'mlp.c_fc.weight', 'mlp.c_proj.weight']
-        # Hugging Face GPT-2 uses Conv1D weights. These are transposed when
-        # copied into this implementation's nn.Linear layers.
-
-        assert len(sd_keys) == len(sd_keys_hf), (
-            f"State dict keys length mismatch: {len(sd_keys)} vs {len(sd_keys_hf)}"
-        )
-
-        for k in sd_keys_hf:
-             if any([k.endswith(w) for w in transposed]):
-                # special treatment for Conv1D weights: we need to transpose 
-                assert sd[k].shape[::-1] == sd_hf[k].shape, (
-                    f"Shape mismatch for {k}: {sd[k].shape} vs {sd_hf[k].shape}"
-                )
-                with torch.no_grad():
-                    sd[k].copy_(sd_hf[k].t())    
-             else:
-                #  vanilla copy over the other parameters
-                assert sd[k].shape == sd_hf[k].shape, (
-                    f"Shape mismatch for {k}: {sd[k].shape} vs {sd_hf[k].shape}"
-                )
-                with torch.no_grad():
-                    sd[k].copy_(sd_hf[k])
-
-        return model
 
     def configure_optimizers(self, weight_decay, learning_rate, device):
-            # Collect all trainable parameters.
-        param_dict = {pn: p for pn, p in self.named_parameters()}
-        param_dict = {pn: p for pn, p in param_dict.items() if p.requires_grad}
+        # Weight decay is applied to matrix weights, not biases or LayerNorm.
+        param_dict = {pn: p for pn, p in self.named_parameters() if p.requires_grad}
+        decay_params = [p for p in param_dict.values() if p.dim() >= 2]
+        no_decay_params = [p for p in param_dict.values() if p.dim() < 2]
 
-        # Apply weight decay to matrix-like parameters (2D and above).
-        # Biases and LayerNorm parameters (1D) are excluded from weight decay.
-        decay_params = [p for n, p in param_dict.items() if p.dim() >= 2]
-        no_decay_params = [p for n, p in param_dict.items() if p.dim() < 2]
         optim_groups = [
-            {'params': decay_params, 'weight_decay': weight_decay},
-            {'params': no_decay_params, 'weight_decay': 0.0}
+            {"params": decay_params, "weight_decay": weight_decay},
+            {"params": no_decay_params, "weight_decay": 0.0},
         ]
 
-        num_decay_params = sum(p.numel() for p in decay_params)
-        num_no_decay_params = sum(p.numel() for p in no_decay_params)
-        print(
-            f"num decayed parameter tensors: {len(decay_params)}, "
-            f"with {num_decay_params:,} parameters"
-        )
-        print(
-            f"num non-decayed parameter tensors: {len(no_decay_params)}, "
-            f"with {num_no_decay_params:,} parameters"
-        )
+        fused_available = "fused" in inspect.signature(torch.optim.AdamW).parameters
+        use_fused = fused_available and device.type == "cuda"
+        print(f"Using fused AdamW: {use_fused}")
 
-        # Use fused AdamW when supported and training on CUDA.
-        fused_available = 'fused' in inspect.signature(torch.optim.AdamW).parameters
-        use_fused = fused_available and 'cuda' in device
-        print(f"using fused AdamW: {use_fused}")
-        optimizer = torch.optim.AdamW(
+        return torch.optim.AdamW(
             optim_groups,
             lr=learning_rate,
             betas=(0.9, 0.95),
@@ -281,351 +261,441 @@ class GPT(nn.Module):
             fused=use_fused,
         )
 
-        return optimizer
 
 # =============================================================================
 # DATA LOADER
 # =============================================================================
 
 def load_tokens(filename):
-    """
-    Load a raw uint16 binary shard and convert
-    token IDs into PyTorch long tensors.
-    """
-    npt = np.fromfile(filename, dtype=np.uint16)
-    tokens = torch.tensor(npt, dtype=torch.long)
-    return tokens
+    """Read one uint16 shard. memmap avoids loading the whole shard into RAM."""
+    return np.memmap(filename, dtype=np.uint16, mode="r")
 
 
 class DataLoaderLite:
-    def __init__(self, B, T, device, split, process_rank=0, num_processes=1):
+
+    def __init__(self, B, T, data_dir, split, process_rank=0, num_processes=1):
         self.B = B
         self.T = T
         self.process_rank = process_rank
         self.num_processes = num_processes
-        assert split in ['train', 'val'], "split must be either 'train' or 'val'"
 
-        # get the shard filenames
-        data_root = "edu_fineweb10B"
-        shards = os.listdir(data_root)
-        shards = [s for s in shards if split in s]
-        shards = sorted(shards)
-        shards = [os.path.join(data_root, s) for s in shards]
-        self.shards = shards
-        assert len(shards) > 0, f"no shards found for split {split}"
-        if master_process:
-            print(f"found {len(shards)} shards of {split} data")
+        assert split in ["train", "val"]
+
+        self.shards = sorted(data_dir.glob(f"edu_fineweb_{split}_*.bin"))
+        assert len(self.shards) > 0, f"No {split} shards found in {data_dir}"
+
+        if process_rank == 0:
+            print(f"Found {len(self.shards)} {split} shard(s).")
+
         self.reset()
 
     def reset(self):
-        # state, init at shard zero
         self.current_shard = 0
         self.tokens = load_tokens(self.shards[self.current_shard])
         self.current_position = self.B * self.T * self.process_rank
-    
+
     def next_batch(self):
         B, T = self.B, self.T
-        buf = self.tokens[
-            self.current_position : self.current_position + B * T + 1
-        ]
-        x = buf[:-1].view(B, T)  # input tokens
-        y = buf[1:].view(B, T)   # next-token targets
+        needed = B * T + 1
 
-        # advance the position in the tensor
-        self.current_position += B * T * self.num_processes
-
-        # if loading the next batch would be out of bound, reset
-        if self.current_position + (B * T * self.num_processes + 1) > len(self.tokens):
+        # Move to the next shard before slicing if this batch would go out of bounds.
+        if self.current_position + needed > len(self.tokens):
             self.current_shard = (self.current_shard + 1) % len(self.shards)
             self.tokens = load_tokens(self.shards[self.current_shard])
             self.current_position = self.B * self.T * self.process_rank
 
+        if self.current_position + needed > len(self.tokens):
+            raise RuntimeError(
+                f"Shard {self.shards[self.current_shard]} is too small for "
+                f"batch={B}, sequence_length={T}."
+            )
+
+        buf = np.asarray(
+            self.tokens[self.current_position:self.current_position + needed],
+            dtype=np.int64,
+        )
+
+        x = torch.from_numpy(buf[:-1].copy()).view(B, T)
+        y = torch.from_numpy(buf[1:].copy()).view(B, T)
+
+        # Each DDP process reads a different section of the token stream.
+        self.current_position += B * T * self.num_processes
         return x, y
 
-# =============================================================================
-# DISTRIBUTED DATA PARALLEL (DDP) INITIALIZATION
-# =============================================================================
-# torchrun sets RANK, LOCAL_RANK, and WORLD_SIZE for each training process.
-# DDP is intended for multi-GPU training; this script also supports a normal
-# single-process run when it is launched directly with Python.
-
-ddp = int(os.environ.get("RANK", -1)) != -1
-if ddp:
-    # Initialize distributed communication between training processes.
-    assert torch.cuda.is_available(), "For DDP, CUDA is required."
-    dist.init_process_group(
-        backend='nccl' if torch.cuda.is_available() else 'gloo'
-    )
-    ddp_rank = int(os.environ['RANK'])
-    ddp_local_rank = int(os.environ['LOCAL_RANK'])
-    ddp_world_size = int(os.environ['WORLD_SIZE'])
-    device = f'cuda:{ddp_local_rank}'
-    torch.cuda.set_device(ddp_local_rank)
-    master_process = ddp_rank == 0  # Rank 0 handles logging and checkpointing.
-else:
-    # Standard single-process training (no DDP).
-    ddp_rank = 0
-    ddp_local_rank = 0
-    ddp_world_size = 1
-    master_process = True
-
-    # attempt to auto detect the device
-    device = "cpu"
-    if torch.cuda.is_available():
-        device = "cuda"
-    elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-        device = "mps"
-    print(f"using device: {device}")
 
 # =============================================================================
-# TRAINING CONFIGURATION
-# =============================================================================
-# Calculate gradient accumulation so the effective batch size stays fixed.
-
-total_batch_size = 32768
-B = 4  # micro-batch size per process
-T = 1024
-assert total_batch_size % (B * T * ddp_world_size) == 0, (
-    "make sure total_batch_size is divisible by B * T * ddp_world_size"
-)
-grad_accum_steps = total_batch_size // (B * T * ddp_world_size)
-if master_process:
-    print(f"total desired batch size: {total_batch_size}")
-    print(f"gradient accumulation steps: {grad_accum_steps}")
-
-# =============================================================================
-# DATA PIPELINE
+# DDP INITIALIZATION
 # =============================================================================
 
-train_loader = DataLoaderLite(
-    B=B,
-    T=T,
-    device=device,
-    process_rank=ddp_rank,
-    num_processes=ddp_world_size,
-    split='train'
-)
+def setup_distributed():
+    ddp = int(os.environ.get("RANK", -1)) != -1
 
-val_loader = DataLoaderLite(
-    B=B,
-    T=T,
-    device=device,
-    process_rank=ddp_rank,
-    num_processes=ddp_world_size,
-    split='val'
-)
+    if ddp:
+        assert torch.cuda.is_available(), "DDP requires CUDA."
+        dist.init_process_group(backend="nccl")
+        rank = int(os.environ["RANK"])
+        local_rank = int(os.environ["LOCAL_RANK"])
+        world_size = int(os.environ["WORLD_SIZE"])
+        torch.cuda.set_device(local_rank)
+        device = torch.device(f"cuda:{local_rank}")
+        master_process = rank == 0
+    else:
+        rank, local_rank, world_size = 0, 0, 1
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        master_process = True
 
-# Set the preferred float32 matrix multiplication precision.
-torch.set_float32_matmul_precision('high')
+    return ddp, rank, local_rank, world_size, device, master_process
 
-# =============================================================================
-# MODEL, COMPILATION, AND OPTIMIZER
-# =============================================================================
-
-model = GPT(GPTConfig(vocab_size=50304))
-model.to(device)
-
-# Compile the model to enable compiler optimizations.
-model = torch.compile(model, mode="default")
-if ddp:
-    model = DDP(model, device_ids=[ddp_local_rank])
-
-raw_model = model.module if ddp else model  # Unwrap DDP when accessing the base model.
-
-max_lr = 6e-4
-min_lr = max_lr * 0.1
-warmup_steps = 715
-max_steps = 19073
 
 # =============================================================================
 # LEARNING-RATE SCHEDULE
 # =============================================================================
 
-def get_lr(it):
-    # 1. Linear warmup.
-    if it < warmup_steps:
-        return max_lr * (it + 1) / warmup_steps 
-    # 2. Hold the minimum learning rate after the schedule ends.
-    if it > max_steps:
-        return min_lr
-    # 3. Cosine decay between warmup and the final step.
-    decay_ratio = (it - warmup_steps) / (max_steps - warmup_steps)
-    assert 0 <= decay_ratio <= 1
+def get_lr(step, max_steps):
+    if step < WARMUP_STEPS:
+        return MAX_LR * (step + 1) / WARMUP_STEPS
+
+    if step >= max_steps:
+        return MIN_LR
+
+    decay_ratio = (step - WARMUP_STEPS) / max(max_steps - WARMUP_STEPS, 1)
     coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio))
-    return min_lr + coeff * (max_lr - min_lr)
+    return MIN_LR + coeff * (MAX_LR - MIN_LR)
 
-# Create the optimizer from the base model's parameters.
-optimizer = raw_model.configure_optimizers(
-    weight_decay=0.1,
-    learning_rate=6e-4,
-    device=device,
-)
-
-# Create the log directory we will write checkpoints to 
-log_dir = "logs"
-os.makedirs(log_dir, exist_ok=True)
-log_file = os.path.join(log_dir, "model_log.txt")
-with open(log_file, "w") as f:
-    f.write("Model Log\n")
-    f.write("=" * 50 + "\n\n")
 
 # =============================================================================
-# TRAINING LOOP
+# CHECKPOINTS AND GRAPHS
 # =============================================================================
 
-for step in range(max_steps):
-    t0 = time.time()
-    last_step = (step == max_steps - 1)
+def save_checkpoint(path, step, model, optimizer, scaler, config):
+    """Save everything required to continue training."""
+    state = {
+        "step": step,
+        "model": model.state_dict(),
+        "optimizer": optimizer.state_dict(),
+        "scaler": scaler.state_dict(),
+        "config": config.__dict__,
+    }
 
-    # once in a while evaluate our validation loss
-    if step % 250 == 0 or last_step:
-        model.eval()
-        val_loader.reset()
-        with torch.no_grad():
-            val_loss_accum = 0.0
-            val_loss_steps = 20
-            for _ in range(val_loss_steps):
-                x, y = val_loader.next_batch()
-                x, y = x.to(device), y.to(device)
-                with torch.autocast(device_type=device, dtype=torch.bfloat16):
-                    logits, loss = model(x, y)
-                loss = loss / val_loss_steps
-                val_loss_accum += loss.detach()
-        if ddp:
-            dist.all_reduce(val_loss_accum, op=dist.ReduceOp.AVG)
-        if master_process:
-            print(f"validation loss: {val_loss_accum.item():.4f}")
-            with open(log_file, "a") as f:
-                f.write(f"step {step}: val loss {val_loss_accum.item():.4f}\n")
+    temp_path = path.with_suffix(".tmp")
+    torch.save(state, temp_path)
+    temp_path.replace(path)
 
-    # once in a while evaluate hellaswag
-    if step % 250 == 0 or last_step:
-        num_correct_norm = 0
-        num_total = 0
 
-        for i, example in enumerate(iterate_examples("val")):
-            # only process examples where i % ddp_world_size == ddp_rank:
-            if i % ddp_world_size != ddp_rank:
-                continue
-            # render the example into tokens and labels
-            _, tokens, mask, label = render_example(example)
-            tokens = tokens.to(device)
-            mask = mask.to(device)
-            # get the logits
-            with torch.no_grad():
-                with torch.autocast(device_type=device, dtype=torch.bfloat16):
-                    logits, loss = model(tokens)
-                pred_norm = get_most_likely_row(tokens, mask, logits)
-            num_total += 1
-            num_correct_norm += int(pred_norm == label)
-        # reduce the stats across all processes
-        if ddp:
-            num_total = torch.tensor(num_total, dtype=torch.long, device=device)
-            num_correct_norm = torch.tensor(num_correct_norm, dtype=torch.long, device=device)
-            dist.all_reduce(num_total, op=dist.ReduceOp.SUM)
-            dist.all_reduce(num_correct_norm, op=dist.ReduceOp.SUM)
-            num_total = num_total.item()
-            num_correct_norm = num_correct_norm.item()
-        acc_norm = num_correct_norm / num_total
-        if master_process:
-            print(f"hellaswag accuracy: {num_correct_norm}/{num_total}={acc_norm:.4f}")
-            with open(log_file, "a") as f:
-                f.write(f"step {step}: hell {acc_norm:.4f}\n")
+def create_training_graphs(metrics_file, output_dir):
+    """Create graphs from the CSV log after training."""
+    try:
+        import pandas as pd
+        import matplotlib.pyplot as plt
+    except ImportError:
+        print("Install pandas and matplotlib to generate training graphs.")
+        return
 
-    # once in a while generate from the model (except step 0, which is noise)
-    # disabled because torch.compile throws error 
-    # if torch.compile disabled, this code works fine
-    if (step > 0 and step % 250) or last_step == 0:
-    # if step > 0 and step % 100 == 0 and False:
-        model.eval()
-        num_return_sequences = 4
-        max_length = 30
-        tokens = enc.encode("Once upon a time, in a land far away, there lived a")
-        tokens = torch.tensor(tokens, dtype=torch.long)  # (sequence_length,)
-        tokens = tokens.unsqueeze(0).repeat(num_return_sequences, 1)
-        xgen = tokens.to(device)
-        sample_rng = torch.Generator(device=device)
-        sample_rng.manual_seed(42 + ddp_rank)
+    if not metrics_file.exists():
+        return
 
-        # Generate tokens autoregressively until max_length is reached.
-        while xgen.size(1) < max_length:
-            # forward the model to get the logits
-            with torch.no_grad():
-                with torch.autocast(device_type=device, dtype=torch.bfloat16):
-                    logits, loss = model(xgen)
-                logits = logits[:, -1, :]  # Use logits from the final sequence position.
-                probs = f.softmax(logits, dim=-1) # get the probabilities
+    data = pd.read_csv(metrics_file)
+    output_dir.mkdir(parents=True, exist_ok=True)
 
-                # Sample from the top 50 most likely next tokens.
-                topk_prob, topk_idx = torch.topk(probs, k=50, dim=-1)
-                ix = torch.multinomial(topk_prob, num_samples=1, generator=sample_rng)
-                xcol = topk_idx.gather(-1, ix)
+    graphs = [
+        ("train_loss", "Training Loss", "Loss"),
+        ("val_loss", "Validation Loss", "Loss"),
+        ("learning_rate", "Learning Rate", "Learning rate"),
+        ("grad_norm", "Gradient Norm", "Gradient norm"),
+        ("tokens_per_sec", "Training Throughput", "Tokens / second"),
+        ("hellaswag_accuracy", "HellaSwag Accuracy", "Accuracy"),
+    ]
 
-                # Append the sampled token to each sequence.
-                xgen = torch.cat((xgen, xcol), dim=1)
+    for column, title, ylabel in graphs:
+        if column not in data or data[column].dropna().empty:
+            continue
 
-        # Decode and print the generated sequences.
-        for i in range(num_return_sequences):
-            tokens = xgen[i, :max_length].tolist()
-            decoded = enc.decode(tokens)
-            print(f"Rank {ddp_rank}: Generated sequence {i+1}: {decoded}")
+        values = data[column].dropna()
+        steps = data.loc[values.index, "step"]
 
-    # training loop
-    model.train()
-    torch.cuda.synchronize()
-    t0 = time.time()
-    optimizer.zero_grad(set_to_none=True)
-    loss_accum = 0.0
+        plt.figure(figsize=(10, 5))
+        plt.plot(steps, values)
+        plt.title(title)
+        plt.xlabel("Training step")
+        plt.ylabel(ylabel)
+        plt.grid(True, alpha=0.3)
+        plt.tight_layout()
+        plt.savefig(output_dir / f"{column}.png", dpi=160)
+        plt.close()
 
-    for micro_step in range(grad_accum_steps):
-        x, y = train_loader.next_batch()
-        x, y = x.to(device), y.to(device)
+    print(f"Training graphs saved to: {output_dir}")
 
-        # Mixed-precision forward pass.
-        with torch.autocast(device_type=device, dtype=torch.bfloat16):
-            logits, loss = model(x, y)
-        
-        # Normalize each micro-batch loss to match the effective batch size.
-        loss = loss / grad_accum_steps
-        loss_accum += loss.detach()
-        if ddp:
-            # Synchronize gradients only on the final accumulation micro-step.
-            model.require_backward_grad_sync = (micro_step == grad_accum_steps - 1)
-        loss.backward()
-    if ddp:
-        dist.all_reduce(loss_accum, op=dist.ReduceOp.AVG)
 
-    # Clip gradients to limit unusually large updates.
-    norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+# =============================================================================
+# TRAINING
+# =============================================================================
 
-    # Update the learning rate for this training step.
-    lr = get_lr(step)
-    for param_group in optimizer.param_groups:
-        param_group['lr'] = lr
-    
-    optimizer.step()
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--data-dir", type=Path, default=DATA_DIR)
+    parser.add_argument("--max-steps", type=int, default=MAX_STEPS)
+    parser.add_argument("--batch-size", type=int, default=B)
+    parser.add_argument("--sequence-length", type=int, default=T)
+    parser.add_argument("--total-batch-size", type=int, default=TOTAL_BATCH_SIZE)
+    parser.add_argument("--resume", type=Path, default=None)
+    parser.add_argument("--hellaswag-interval", type=int, default=HELLASWAG_INTERVAL)
+    parser.add_argument("--hellaswag-max-examples", type=int, default=HELLASWAG_MAX_EXAMPLES)
+    args = parser.parse_args()
 
-    torch.cuda.synchronize()
-    t1 = time.time()
+    ddp, rank, local_rank, world_size, device, master_process = setup_distributed()
 
-    dt = t1 - t0
-    tokens_per_sec = (
-        train_loader.B * train_loader.T * grad_accum_steps * ddp_world_size
-    ) / dt
+    try:
+        random.seed(1337 + rank)
+        np.random.seed(1337 + rank)
+        torch.manual_seed(1337 + rank)
 
-    if master_process:
-        print(
-            f"step: {step:5d} | "
-            f"loss: {loss_accum.item():.4f} | "
-            f"lr: {lr:.2e} | "
-            f"norm: {norm:.4f} | "
-            f"dt: {dt * 1000:.2f} | "
-            f"tok/sec: {tokens_per_sec:.2f}"
+        if device.type == "cuda":
+            torch.cuda.manual_seed_all(1337 + rank)
+            torch.set_float32_matmul_precision("high")
+
+        # Select precision based on the actual GPU.
+        use_bf16 = device.type == "cuda" and torch.cuda.is_bf16_supported()
+        amp_dtype = torch.bfloat16 if use_bf16 else torch.float16
+        use_amp = device.type == "cuda"
+
+        # FP16 needs gradient scaling; BF16 does not.
+        scaler = torch.amp.GradScaler(
+            "cuda",
+            enabled=(use_amp and amp_dtype == torch.float16),
         )
-        with open(log_file, "a") as f:
-            f.write(
-                f"step {step}: loss {loss_accum.item():.4f}, lr {lr:.2e}, norm {norm:.4f}, dt {dt*1000:.2f}, tok/sec {tokens_per_sec:.2f}\n"
-            )
 
-if ddp:
-    dist.destroy_process_group()
+        total_batch_size = args.total_batch_size
+        B = args.batch_size
+        T = args.sequence_length
+
+        assert total_batch_size % (B * T * world_size) == 0, (
+            "total batch size must be divisible by B * T * number of GPUs"
+        )
+        grad_accum_steps = total_batch_size // (B * T * world_size)
+
+        if master_process:
+            print("=" * 72)
+            print("DumGPT training")
+            print("=" * 72)
+            print(f"Device              : {device}")
+            print(f"Number of GPUs      : {world_size}")
+            print(f"Precision           : {'BF16' if use_bf16 else 'FP16' if use_amp else 'FP32'}")
+            print(f"Micro batch         : {B}")
+            print(f"Sequence length     : {T}")
+            print(f"Total batch tokens  : {total_batch_size}")
+            print(f"Gradient accum steps: {grad_accum_steps}")
+
+        # Load training and validation shards.
+        train_loader = DataLoaderLite(B, T, args.data_dir, "train", rank, world_size)
+        val_loader = DataLoaderLite(B, T, args.data_dir, "val", rank, world_size)
+
+        # Build the model.
+        config = GPTConfig()
+        model = GPT(config).to(device)
+
+        if ddp:
+            model = DDP(model, device_ids=[local_rank])
+
+        raw_model = model.module if ddp else model
+
+        optimizer = raw_model.configure_optimizers(
+            weight_decay=WEIGHT_DECAY,
+            learning_rate=MAX_LR,
+            device=device,
+        )
+
+        CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
+        OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+        # Resume model + optimizer + scaler state if a checkpoint was supplied.
+        start_step = 0
+        if args.resume is not None:
+            checkpoint = torch.load(args.resume, map_location=device, weights_only=False)
+            raw_model.load_state_dict(checkpoint["model"])
+            optimizer.load_state_dict(checkpoint["optimizer"])
+            if "scaler" in checkpoint:
+                scaler.load_state_dict(checkpoint["scaler"])
+            start_step = checkpoint["step"] + 1
+            if master_process:
+                print(f"Resuming from step {start_step}")
+
+        metrics_file = OUTPUT_DIR / "metrics.csv"
+        if master_process and not metrics_file.exists():
+            with metrics_file.open("w", newline="") as file:
+                writer = csv.writer(file)
+                writer.writerow([
+                    "step", "train_loss", "val_loss", "learning_rate",
+                    "grad_norm", "step_ms", "tokens_per_sec", "hellaswag_accuracy",
+                ])
+
+        # Autocast only on CUDA. CPU training remains FP32.
+        from contextlib import nullcontext
+
+        def autocast_context():
+            if use_amp:
+                return torch.autocast(device_type="cuda", dtype=amp_dtype)
+            return nullcontext()
+
+        for step in range(start_step, args.max_steps):
+            t0 = time.time()
+            model.train()
+
+            lr = get_lr(step, args.max_steps)
+            for param_group in optimizer.param_groups:
+                param_group["lr"] = lr
+
+            optimizer.zero_grad(set_to_none=True)
+            loss_accum = torch.zeros((), device=device)
+
+            # Accumulate gradients to reach the desired effective batch size.
+            for micro_step in range(grad_accum_steps):
+                x, y = train_loader.next_batch()
+                x, y = x.to(device), y.to(device)
+
+                # DDP only synchronizes gradients on the final micro-batch.
+                sync_context = (
+                    model.no_sync()
+                    if ddp and micro_step < grad_accum_steps - 1
+                    else nullcontext()
+                )
+
+                with sync_context:
+                    with autocast_context():
+                        logits, loss = model(x, y)
+
+                    loss_accum += loss.detach() / grad_accum_steps
+                    scaler.scale(loss / grad_accum_steps).backward()
+
+            scaler.unscale_(optimizer)
+            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+
+            scaler.step(optimizer)
+            scaler.update()
+
+            if device.type == "cuda":
+                torch.cuda.synchronize(device)
+
+            elapsed = time.time() - t0
+            tokens_per_sec = (
+                B * T * grad_accum_steps * world_size
+            ) / max(elapsed, 1e-9)
+
+            if ddp:
+                dist.all_reduce(loss_accum, op=dist.ReduceOp.AVG)
+
+            train_loss = loss_accum.item()
+            val_loss = float("nan")
+            hellaswag_accuracy = float("nan")
+
+            # Validation loss.
+            if step % VAL_INTERVAL == 0 or step == args.max_steps - 1:
+                model.eval()
+                val_loss_accum = torch.zeros((), device=device)
+
+                with torch.no_grad():
+                    for _ in range(VAL_STEPS):
+                        x, y = val_loader.next_batch()
+                        x, y = x.to(device), y.to(device)
+
+                        with autocast_context():
+                            _, loss = model(x, y)
+
+                        val_loss_accum += loss.detach() / VAL_STEPS
+
+                if ddp:
+                    dist.all_reduce(val_loss_accum, op=dist.ReduceOp.AVG)
+
+                val_loss = val_loss_accum.item()
+                model.train()
+
+            # HellaSwag evaluation is optional because it can take time.
+            if args.hellaswag_interval > 0 and (
+                step % args.hellaswag_interval == 0 or step == args.max_steps - 1
+            ):
+                if master_process:
+                    correct, total = evaluate_hellaswag(
+                        raw_model,
+                        device,
+                        max_examples=args.hellaswag_max_examples,
+                        amp_dtype=amp_dtype if use_amp else None,
+                    )
+                    hellaswag_accuracy = correct / max(total, 1)
+                    print(
+                        f"HellaSwag: {correct}/{total} = "
+                        f"{hellaswag_accuracy:.4f}"
+                    )
+
+                if ddp:
+                    score = torch.tensor(
+                        hellaswag_accuracy if master_process else 0.0,
+                        device=device,
+                    )
+                    dist.broadcast(score, src=0)
+                    hellaswag_accuracy = score.item()
+
+            # Print and save metrics only from the main process.
+            if master_process:
+                print(
+                    f"step: {step:5d} | "
+                    f"loss: {train_loss:.4f} | "
+                    f"val: {val_loss:.4f} | "
+                    f"lr: {lr:.2e} | "
+                    f"norm: {grad_norm:.4f} | "
+                    f"dt: {elapsed * 1000:.2f} ms | "
+                    f"tok/sec: {tokens_per_sec:.2f}"
+                )
+
+                with metrics_file.open("a", newline="") as file:
+                    writer = csv.writer(file)
+                    writer.writerow([
+                        step, train_loss, val_loss, lr, float(grad_norm),
+                        elapsed * 1000, tokens_per_sec, hellaswag_accuracy,
+                    ])
+
+                # Generate a small sample to see how the model is learning.
+                if step > 0 and SAMPLE_INTERVAL > 0 and step % SAMPLE_INTERVAL == 0:
+                    model.eval()
+                    tokens = enc.encode("Once upon a time, in a land far away,")
+                    xgen = torch.tensor(tokens, dtype=torch.long, device=device).unsqueeze(0)
+
+                    with torch.no_grad():
+                        for _ in range(30):
+                            logits, _ = raw_model(xgen[:, -BLOCK_SIZE:])
+                            logits = logits[:, -1, :]
+                            probs = F.softmax(logits, dim=-1)
+                            topk_prob, topk_idx = torch.topk(probs, k=50, dim=-1)
+                            next_token = topk_idx.gather(
+                                -1,
+                                torch.multinomial(topk_prob, num_samples=1),
+                            )
+                            xgen = torch.cat((xgen, next_token), dim=1)
+
+                    print("Generated:", enc.decode(xgen[0].tolist()))
+                    model.train()
+
+            # Save resumable checkpoints periodically.
+            if SAVE_INTERVAL > 0 and (
+                (step + 1) % SAVE_INTERVAL == 0 or step == args.max_steps - 1
+            ):
+                if master_process:
+                    save_checkpoint(
+                        CHECKPOINT_DIR / "latest.pt",
+                        step,
+                        raw_model,
+                        optimizer,
+                        scaler,
+                        config,
+                    )
+                    print(f"Checkpoint saved at step {step}")
+
+        if master_process:
+            print("\nTraining complete.")
+            create_training_graphs(metrics_file, OUTPUT_DIR / "plots")
+
+    finally:
+        if ddp:
+            dist.destroy_process_group()
+
+
+if __name__ == "__main__":
+    main()
