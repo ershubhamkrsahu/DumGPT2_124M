@@ -314,9 +314,9 @@ What I picked up:
 - Validation runs under `torch.no_grad()` and autocast. No gradients means no graph and much less memory, which lets me use the same batch size without thinking about it.
 - `reset()` on the validation loader makes every evaluation start from the same place, so the numbers are comparable across steps instead of drifting with the loader state.
 - I average 20 validation batches (about 82k tokens) to reduce noise. With DDP I all-reduce that average across ranks.
-- Every 100 steps is a compromise. Validation costs time, and because I put it inside the timed region, those steps show an artificially bad `dt` and tok/s. I'd move it outside the timer later.
+- Every 100 steps is a compromise. Validation costs time, so I moved it before the timer starts — now `dt` and tok/s only measure the actual training step instead of being dragged down by evaluation.
 - The validation shard is 100M tokens, which is way more than I need, but reusing the shard format kept the loader simple.
-- Generation is behind `and False` because `torch.compile` throws an error when it runs. That block also still has a bad `gather` call I need to fix before turning it back on.
+- Generation is behind `and False` because `torch.compile` throws an error when it runs. I fixed the bad `gather` call, but it stays off until I sort out the compile error.
 
 ---
 
