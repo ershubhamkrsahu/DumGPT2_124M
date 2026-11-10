@@ -231,7 +231,7 @@ class GPT(nn.Module):
 # DATA LOADER
 # ---------------------------------------------------------------------------------
 class DataLoaderLite:
-    def __init__(self, B, T, device):
+    def __init__(self, B, T):
         self.B = B
         self.T = T
 
