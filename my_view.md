@@ -193,7 +193,7 @@ What I picked up:
 - GPU matmuls are happiest when dimensions are multiples of 128 (or at least 64 or 32). Anything else leaves partial tiles and wasted work at the boundary.
 - When training from scratch, vocab size is basically a free architectural choice, so rounding it up is a cheap win.
 - The padded rows do add a tiny bit of parameter and compute cost, but 47 out of 50,257 is ~0.1%, way less than the waste it removes.
-- Right now I made this change inside `from_pretrained`, so it isn't touching the training path yet — training still builds `GPT(GPTConfig())` with the default 50,257. I need to move it into `GPTConfig` for the speedup to actually apply.
+- I first made this change inside `from_pretrained`, which didn't touch the training path. I later moved it into the training config with `GPTConfig(vocab_size=50304)`, so the speedup is active now.
 
 ---
 
@@ -246,16 +246,39 @@ I also started adding a `device` argument to `DataLoaderLite` but didn't pass it
 
 ---
 
+## Phase 5 — distributed training (attempted)
+
+### b08b074 — DDP scaffolding, parked for now
+
+I added the DDP plumbing: detect the `torchrun` environment variables, initialize the process group, give each rank its own device and strided slice of the token stream, turn off gradient sync except on the last micro-step, all-reduce the loss, log only from rank 0, and destroy the process group at the end. I also finally moved `vocab_size=50304` into the training config, so the padding optimization is actually active now.
+
+Why: DDP is how the same model gets trained across multiple GPUs. Each rank sees different data, and the gradients get averaged, so the optimization behaves like one big batch instead of N independent runs.
+
+The honest part: **I didn't get the DDP section working.** I kept getting errors and tried to fix them, but I couldn't get past them, so I've parked it for now. The biggest reason is that this machine only has one GPU — debugging multi-GPU communication when you can't actually run multiple processes is painful. On top of that, I'm on Windows, where the usual NCCL backend isn't really available. The normal single-GPU path (`ddp=False`) is untouched, so this doesn't block my training.
+
+What I picked up:
+- `torchrun` sets `RANK`, `LOCAL_RANK`, and `WORLD_SIZE`. If `RANK` isn't set, it's a plain single-process run.
+- Each rank has to see different data. Starting at `B*T*rank` and advancing by `B*T*world_size` gives every rank a strided chunk and still covers the dataset once per global step.
+- DDP averages gradients during backward. With gradient accumulation, syncing on every micro-step is wasted communication, so `require_backward_grad_sync` stays off until the final micro-step.
+- The logged loss should be all-reduced with `AVG` across ranks, otherwise rank 0 is only reporting its own slice.
+- Only the master process should print or checkpoint; otherwise N processes flood the console.
+- `model.module` unwraps the DDP container so the optimizer is built on the real model, not the wrapper.
+- Effective batch size is `B*T*grad_accum*world_size`, which is why `grad_accum` has to be divided by the world size.
+- NCCL is NVIDIA's collective communication library. It's Linux-first, so Windows doesn't have the normal `nccl` backend, which is part of why I'm leaving this alone for now.
+
+---
+
 ## where things stand
 
 - The script trains a randomly initialized GPT-2 124M on Tiny Shakespeare.
 - It runs 50 steps with compile, bf16 autocast, Flash Attention, gradient accumulation to a 32k-token effective batch, warmup + cosine LR decay, gradient clipping, fused AdamW with decay/no-decay groups, and tok/s logging, then exits before the generation block.
+- DDP scaffolding is in the file but parked — the single-GPU path is what actually runs today.
 - The generation code is still there as a reference. I can reach it by removing `sys.exit(0)`.
 
 ## stuff I want to try next
 
 - Evaluate on a held-out split instead of only watching training loss.
 - Save and resume checkpoints, including optimizer state.
-- Gradient accumulation and distributed training to get bigger effective batches.
+- Get the DDP path working on a machine with more than one GPU.
 - Tune weight decay and the max learning rate further.
 - Generate samples after training so I can actually read what the model learned.
