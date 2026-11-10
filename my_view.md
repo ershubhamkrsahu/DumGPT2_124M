@@ -214,12 +214,25 @@ What I picked up:
 - `clip_grad_norm_` rescales all gradients if their global norm goes above 1.0. This stops one bad batch — especially with bf16 — from blowing up the weights. It returns the norm *before* clipping, which is why logging it is useful: if it keeps sitting at 1.0, clipping is doing real work.
 - `betas=(0.9, 0.95)` is the GPT-3 setting. A lower `beta2` than the usual 0.999 makes the second moment adapt faster to recent gradient variance, which suits large models and larger batches.
 
+### 5d5be6c — splitting params for weight decay and using fused AdamW
+
+I moved optimizer creation into `GPT.configure_optimizers()` and now build two param groups: everything with 2D+ shape gets `weight_decay=0.1`, and everything 1D (biases and LayerNorm gains) gets zero decay. I also bumped `max_lr` to `6e-4` and switched to the fused AdamW kernel when CUDA is available.
+
+Why: weight decay is a pull toward zero, which is fine for weight matrices because that's the regularization I actually want. It makes no sense for biases and LayerNorm gains — zeroing a bias just removes a degree of freedom, and LayerNorm gains have a natural scale around 1. I could also push the LR up to `6e-4` because warmup, clipping, and the decay groups made the early steps stable enough.
+
+What I picked up:
+- `p.dim() >= 2` is the usual heuristic: matrices and embeddings get decayed, vectors (biases, LayerNorm weights) don't.
+- A param group in AdamW is just a dict with `'params'` plus overrides. That's why my LR loop can set `param_group['lr']` every step.
+- Fused AdamW does the whole update in one CUDA kernel instead of many small ones, which cuts memory traffic. It only works on CUDA, so I check for `fused` in `inspect.signature(torch.optim.AdamW)` and also check the device before using it.
+- Decoupled weight decay is not the same as L2 in the loss. It shrinks weights directly, which behaves better with Adam's adaptive scaling.
+- Filtering on `requires_grad` matters if I ever freeze layers, since frozen params shouldn't be in the optimizer at all.
+
 ---
 
 ## where things stand
 
 - The script trains a randomly initialized GPT-2 124M on Tiny Shakespeare.
-- It runs 50 steps with compile, bf16 autocast, Flash Attention, warmup + cosine LR decay, gradient clipping, and tok/s logging, then exits before the generation block.
+- It runs 50 steps with compile, bf16 autocast, Flash Attention, warmup + cosine LR decay, gradient clipping, fused AdamW with decay/no-decay groups, and tok/s logging, then exits before the generation block.
 - The generation code is still there as a reference. I can reach it by removing `sys.exit(0)`.
 
 ## stuff I want to try next
@@ -227,5 +240,5 @@ What I picked up:
 - Evaluate on a held-out split instead of only watching training loss.
 - Save and resume checkpoints, including optimizer state.
 - Gradient accumulation and distributed training to get bigger effective batches.
-- A real LR schedule with warmup and cosine decay, plus gradient clipping.
+- Tune weight decay and the max learning rate further.
 - Generate samples after training so I can actually read what the model learned.
