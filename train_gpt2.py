@@ -9,6 +9,11 @@ import time
 import math
 import inspect
 
+# DDP
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
+import os
+
 # ---------------------------------------------------------------------------------
 # INITIALIZATIONS
 # ---------------------------------------------------------------------------------
@@ -231,9 +236,11 @@ class GPT(nn.Module):
 # DATA LOADER
 # ---------------------------------------------------------------------------------
 class DataLoaderLite:
-    def __init__(self, B, T, device):
+    def __init__(self, B, T, device, process_rank=0, num_processes=1):
         self.B = B
         self.T = T
+        self.process_rank = process_rank
+        self.num_processes = num_processes
 
         # at init load tokens from disk and store them in memory
         with open('input.txt', 'r') as file:
@@ -244,7 +251,7 @@ class DataLoaderLite:
         print(f"1 epoch = {len(self.tokens) // (B * T)} batches")
 
         # state
-        self.current_position = 0
+        self.current_position = self.B * self.T * self.process_rank
     
     def next_batch(self):
         B, T = self.B, self.T
@@ -253,50 +260,77 @@ class DataLoaderLite:
         y = (buf[1:].view(B, T)) # targets
 
         # advance the position in the tensor
-        self.current_position += B * T
+        self.current_position += B * T * self.num_processes
 
         # if loading the next batch would be out of bound, reset
-        if self.current_position + (B * T + 1) > len(self.tokens):
-            self.current_position = 0
+        if self.current_position + (B * T * self.num_processes + 1) > len(self.tokens):
+            self.current_position = self.B * self.T * self.process_rank
 
         return x, y
 
+# ---------------------------------------------------------------------------------
+# DISTRIBUTED DATA PARALLEL
+# ---------------------------------------------------------------------------------
+# !only helps if you have multiple GPUs in your system 
+# torchrun commands sets the env vars RANK, LOCAL_RANK, and WORLD_SIZE
+ddp = int(os.environ.get('RANK', -1)) != -1 # is this a ddp run?)
+if ddp:
+    # uses the torch.distributed package to handle communication between processes
+    assert torch.cuda.is_available(), "For DDP, CUDA is required."
+    dist.init_process_group(
+        backend='nccl' if torch.cuda.is_available() else 'gloo'
+    )
+    ddp_rank = int(os.environ['RANK'])
+    ddp_local_rank = int(os.environ['LOCAL_RANK'])
+    ddp_world_size = int(os.environ['WORLD_SIZE'])
+    device = f'cuda:{ddp_local_rank}'
+    torch.cuda.set_device(ddp_local_rank)
+    master_process = ddp_rank == 0 # this process will do logging, checkpointing etc.
+else:
+    # vanilla, no-DDP run
+    ddp_rank = 0
+    ddp_local_rank = 0
+    ddp_world_size = 1
+    master_process = True
 
-# ---------------------------------------------------------------------------------
-# ATTEMPT TO AUTODETECT THE DEVICE
-# ---------------------------------------------------------------------------------
-device = "cpu"
-if torch.cuda.is_available():
-    device = "cuda"
-elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-    device = "mps"
-print(f"using device: {device}") 
+    # attempt to auto detect the device
+    device = "cpu"
+    if torch.cuda.is_available():
+        device = "cuda"
+    elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+        device = "mps"
+    print(f"using device: {device}") 
 
 # calculate gradient accumulation steps
 total_batch_size = 32768
 B = 4 # micro batch size
 T = 1024
-assert total_batch_size % (B * T) == 0, "make sure total_batch_size is divisible by B * T"
-grad_accum_steps = total_batch_size // (B * T)
-print(f"total desired batch size: {total_batch_size}")
-print(f"gradient accumulation steps: {grad_accum_steps}")
+assert total_batch_size % (B * T * ddp_world_size) == 0, "make sure total_batch_size is divisible by B * T * ddp_world_size"
+grad_accum_steps = total_batch_size // (B * T * ddp_world_size)
+if master_process:
+    print(f"total desired batch size: {total_batch_size}")
+    print(f"gradient accumulation steps: {grad_accum_steps}")
 
 # ---------------------------------------------------------------------------------
 # GET A DATA BATCH
 # ---------------------------------------------------------------------------------
-train_loader = DataLoaderLite(B=B, T=T, device=device)
+train_loader = DataLoaderLite(B=B, T=T, device=device, process_rank=ddp_rank, num_processes=ddp_world_size)
 
 # enable mixed precision training
 torch.set_float32_matmul_precision('high')
 
 # ---------------------------------------------------------------------------------
-# GET LOGITS
+# CREATE THE MODEL
 # ---------------------------------------------------------------------------------
-model = GPT(GPTConfig())
+model = GPT(GPTConfig(vocab_size=50304))
 model.to(device)
 
 # add compile for faster training on GPU (if available)
 model = torch.compile(model, mode="default")
+if ddp:
+    model = DDP(model, device_ids=[ddp_local_rank])
+
+raw_model = model.module if ddp else model # unwrap DDP container if needed
 
 max_lr = 6e-4
 min_lr = max_lr * 0.1
@@ -318,7 +352,7 @@ def get_lr(it):
     return min_lr + coeff * (max_lr - min_lr)
 
 # optimizer 
-optimizer = model.configure_optimizers(weight_decay=0.1, learning_rate=6e-4, device=device)
+optimizer = raw_model.configure_optimizers(weight_decay=0.1, learning_rate=6e-4, device=device)
 
 for step in range(max_steps):
     torch.cuda.synchronize()
@@ -335,7 +369,11 @@ for step in range(max_steps):
         
         loss = loss / grad_accum_steps # this is the "normalizer" for equivalent results
         loss_accum += loss.detach()
+        if ddp:
+            model.require_backward_grad_sync = (micro_step == grad_accum_steps - 1)
         loss.backward()
+    if ddp:
+        dist.all_reduce(loss_accum, op=dist.ReduceOp.AVG)
 
     # clipping gradients prevents shocks
     norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
@@ -351,16 +389,19 @@ for step in range(max_steps):
     t1 = time.time()
 
     dt = t1 - t0
-    tokens_per_sec = (train_loader.B * train_loader.T * grad_accum_steps) / dt
+    tokens_per_sec = (train_loader.B * train_loader.T * grad_accum_steps * ddp_world_size) / dt
 
-    print(
-    f"step: {step:5d} | "
-    f"loss: {loss_accum.item():.4f} | "
-    f"lr: {lr:.2e} | "
-    f"norm: {norm:.4f} | "
-    f"dt: {dt * 1000:.2f} | "
-    f"tok/sec: {tokens_per_sec:.2f}"
-    )
+    if master_process:
+        print(
+            f"step: {step:5d} | "
+            f"loss: {loss_accum.item():.4f} | "
+            f"lr: {lr:.2e} | "
+            f"norm: {norm:.4f} | "
+            f"dt: {dt * 1000:.2f} | "
+            f"tok/sec: {tokens_per_sec:.2f}"
+        )
+if ddp:
+    dist.destroy_process_group()
 
 sys.exit(0)
 
