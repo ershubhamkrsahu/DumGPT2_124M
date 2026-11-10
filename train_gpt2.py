@@ -231,7 +231,7 @@ class GPT(nn.Module):
 # DATA LOADER
 # ---------------------------------------------------------------------------------
 class DataLoaderLite:
-    def __init__(self, B, T):
+    def __init__(self, B, T, device):
         self.B = B
         self.T = T
 
@@ -272,18 +272,27 @@ elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
     device = "mps"
 print(f"using device: {device}") 
 
+# calculate gradient accumulation steps
+total_batch_size = 32768
+B = 4 # micro batch size
+T = 1024
+assert total_batch_size % (B * T) == 0, "make sure total_batch_size is divisible by B * T"
+grad_accum_steps = total_batch_size // (B * T)
+print(f"total desired batch size: {total_batch_size}")
+print(f"gradient accumulation steps: {grad_accum_steps}")
+
 # ---------------------------------------------------------------------------------
 # GET A DATA BATCH
 # ---------------------------------------------------------------------------------
-train_loader = DataLoaderLite(B=4, T=1024)
+train_loader = DataLoaderLite(B=B, T=T)
+
 # enable mixed precision training
 torch.set_float32_matmul_precision('high')
 
 # ---------------------------------------------------------------------------------
 # GET LOGITS
 # ---------------------------------------------------------------------------------
-# model = GPT.from_pretrained('gpt2')
-model = GPT(GPTConfig())  # create a new GPT model with the default configuration
+model = GPT(GPTConfig())
 model.to(device)
 
 # add compile for faster training on GPU (if available)
@@ -309,23 +318,25 @@ def get_lr(it):
     return min_lr + coeff * (max_lr - min_lr)
 
 # optimizer 
-# optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, betas=(0.9, 0.95), eps=1e-8)
 optimizer = model.configure_optimizers(weight_decay=0.1, learning_rate=6e-4, device=device)
 
 for step in range(max_steps):
     torch.cuda.synchronize()
     t0 = time.time()
-
-    x, y = train_loader.next_batch()
-    x, y = x.to(device), y.to(device)
-
     optimizer.zero_grad(set_to_none=True)
+    loss_accum = 0.0
 
-    # use automatic mixed precision training  
-    with torch.autocast(device_type=device, dtype=torch.bfloat16):
-        logits, loss = model(x, y)
+    for micro_step in range(grad_accum_steps):
+        x, y = train_loader.next_batch()
+        x, y = x.to(device), y.to(device)
 
-    loss.backward()
+        # use automatic mixed precision training  
+        with torch.autocast(device_type=device, dtype=torch.bfloat16):
+            logits, loss = model(x, y)
+        
+        loss = loss / grad_accum_steps # this is the "normalizer" for equivalent results
+        loss_accum += loss.detach()
+        loss.backward()
 
     # clipping gradients prevents shocks
     norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
@@ -341,17 +352,17 @@ for step in range(max_steps):
     t1 = time.time()
 
     dt = t1 - t0
-    tokens_per_sec = (train_loader.B * train_loader.T) / dt
+    tokens_per_sec = (train_loader.B * train_loader.T * grad_accum_steps) / dt
 
     print(
     f"step: {step:5d} | "
-    f"loss: {loss.item():.4f} | "
+    f"loss: {loss_accum.item():.4f} | "
     f"lr: {lr:.2e} | "
     f"norm: {norm:.4f} | "
     f"dt: {dt * 1000:.2f} | "
     f"tok/sec: {tokens_per_sec:.2f}"
     )
-    
+
 sys.exit(0)
 
 # prefix tokens
