@@ -2,30 +2,25 @@
 [project]
 name = "dumgpt2-124m"
 version = "0.1.0"
-description = "A GPT-2 implementation and fine-tuning project"
+description = "A GPT-2 implementation and training project"
 readme = "README.md"
 authors = [
     { name = "Shubham Kumar Sahu", email = "shubhamisok@gmail.com" }
 ]
 requires-python = ">=3.12,<3.13"
+
 dependencies = [
     "datasets>=5.2.0",
     "numpy>=2.5.4",
     "tiktoken>=0.14.0",
-    "torch>=2.14.1",
+    "torch==2.14.1",
     "tqdm>=4.70.1",
     "transformers>=5.22.2",
-    "triton-windows>=3.8,<3.9",
+    "triton-windows>=3.9.0.post30",
+    "matplotlib>=3.10",
 ]
 
-[project.scripts]
-dumgpt2-124m = "dumgpt2_124m:main"
-
-[build-system]
-requires = ["uv_build>=0.13.6,<0.14.0"]
-build-backend = "uv_build"
-
-# PyTorch CUDA 13.0 package source
+# PyTorch CUDA 13.0 wheels for Windows
 [[tool.uv.index]]
 name = "pytorch-cu130"
 url = "https://download.pytorch.org/whl/cu130"
