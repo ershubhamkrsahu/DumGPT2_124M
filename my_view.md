@@ -301,17 +301,36 @@ What I picked up:
 
 ---
 
+## Phase 7 — evaluation
+
+### 6f63db8 — validation loss every 100 steps
+
+I added a `reset()` method to `DataLoaderLite`, created a second loader for the validation split, and now measure validation loss every 100 steps over 20 batches. I also moved the old generation code inside the training loop (disabled for now) and deleted the dead block after `sys.exit(0)`.
+
+Why: training loss by itself can lie. It's measured on the same shards the model is fitting, so it mostly tells me how well the model is memorizing. Validation loss on the held-out shard tells me whether it's actually learning patterns that transfer. If train loss keeps dropping while val loss stalls or rises, I'm overfitting.
+
+What I picked up:
+- `model.eval()` and `model.train()` change behavior for things like dropout and batch norm. GPT-2 here has neither, but I still switch modes so the habit is correct and future changes don't silently break.
+- Validation runs under `torch.no_grad()` and autocast. No gradients means no graph and much less memory, which lets me use the same batch size without thinking about it.
+- `reset()` on the validation loader makes every evaluation start from the same place, so the numbers are comparable across steps instead of drifting with the loader state.
+- I average 20 validation batches (about 82k tokens) to reduce noise. With DDP I all-reduce that average across ranks.
+- Every 100 steps is a compromise. Validation costs time, and because I put it inside the timed region, those steps show an artificially bad `dt` and tok/s. I'd move it outside the timer later.
+- The validation shard is 100M tokens, which is way more than I need, but reusing the shard format kept the loader simple.
+- Generation is behind `and False` because `torch.compile` throws an error when it runs. That block also still has a bad `gather` call I need to fix before turning it back on.
+
+---
+
 ## where things stand
 
 - The script trains a randomly initialized GPT-2 124M on shards from the FineWeb-Edu `sample-10BT` dataset.
 - The dataset is tokenized into 100 `uint16` shards under `edu_fineweb10B/` (~18.5 GiB): shard 0 is validation, the rest are training. The shards and `input.txt` are ignored by git.
-- It runs up to 19,073 steps with compile, bf16 autocast, Flash Attention, gradient accumulation to a 32k-token effective batch, warmup + cosine LR decay, gradient clipping, fused AdamW with decay/no-decay groups, and tok/s logging, then exits before the generation block.
+- It runs up to 19,073 steps with compile, bf16 autocast, Flash Attention, gradient accumulation to a 32k-token effective batch, warmup + cosine LR decay, gradient clipping, fused AdamW with decay/no-decay groups, and tok/s logging.
+- Every 100 steps it also measures validation loss on the held-out shard. Generation is present but disabled because `torch.compile` errors on it.
 - DDP scaffolding is in the file but parked — the single-GPU path is what actually runs today.
-- The generation code is still there as a reference. I can reach it by removing `sys.exit(0)`.
 
 ## stuff I want to try next
 
-- Evaluate on the validation shard instead of only watching training loss.
+- Fix the generation path under `torch.compile` (and its `gather` call) so samples can run during training.
 - Prefetch the next shard in the background so disk reads don't stall the GPU.
 - Save and resume checkpoints, including optimizer state.
 - Get the DDP path working on a machine with more than one GPU.
