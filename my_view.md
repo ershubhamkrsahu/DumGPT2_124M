@@ -227,12 +227,29 @@ What I picked up:
 - Decoupled weight decay is not the same as L2 in the loss. It shrinks weights directly, which behaves better with Adam's adaptive scaling.
 - Filtering on `requires_grad` matters if I ever freeze layers, since frozen params shouldn't be in the optimizer at all.
 
+### e0c4ca8 — gradient accumulation for a 32k-token batch
+
+I set `total_batch_size = 32768` and kept the micro-batch at `B=4, T=1024`. That gives `grad_accum_steps = 8`. The training loop now runs 8 forward/backward passes, divides every loss by 8, and only calls `optimizer.step()` once at the end.
+
+Why: a 32k-token batch is 8× bigger than what fits in memory at `B=4`. Accumulation lets me get the optimization behavior of a big batch without holding all of its activations at once.
+
+What I picked up:
+- Dividing the loss by `grad_accum_steps` before `backward()` is essential. Without it, gradients sum across micro-batches instead of averaging, which silently multiplies the effective learning rate by 8.
+- `zero_grad()` stays outside the inner loop. Gradients are supposed to accumulate; only the parameter update happens once.
+- `loss_accum` is detached so logging doesn't keep the graph alive.
+- Throughput has to include `grad_accum_steps`, otherwise tok/s looks 8× worse than it really is.
+- The math is equivalent to one big batch, but not bit-for-bit identical: it's 8 sequential chunks, so the order and gradient noise can differ slightly.
+- Clip after the whole accumulation window, not after each micro-batch, otherwise I'd be clipping partial gradients.
+- Memory stays at one micro-batch's activations; the only thing that persists is the accumulated gradient buffer.
+
+I also started adding a `device` argument to `DataLoaderLite` but didn't pass it at the call site yet, so that's still a loose end.
+
 ---
 
 ## where things stand
 
 - The script trains a randomly initialized GPT-2 124M on Tiny Shakespeare.
-- It runs 50 steps with compile, bf16 autocast, Flash Attention, warmup + cosine LR decay, gradient clipping, fused AdamW with decay/no-decay groups, and tok/s logging, then exits before the generation block.
+- It runs 50 steps with compile, bf16 autocast, Flash Attention, gradient accumulation to a 32k-token effective batch, warmup + cosine LR decay, gradient clipping, fused AdamW with decay/no-decay groups, and tok/s logging, then exits before the generation block.
 - The generation code is still there as a reference. I can reach it by removing `sys.exit(0)`.
 
 ## stuff I want to try next
