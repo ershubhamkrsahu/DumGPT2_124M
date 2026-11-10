@@ -7,6 +7,7 @@ import tiktoken
 import sys
 import time
 import math
+import inspect
 
 # ---------------------------------------------------------------------------------
 # INITIALIZATIONS
@@ -198,6 +199,34 @@ class GPT(nn.Module):
 
         return model
 
+    def configure_optimizers(self, weight_decay, learning_rate, device):
+        # start with all of candidate parameters
+        param_dict = {pn: p for pn, p in self.named_parameters()}
+        param_dict = {pn: p for pn, p in param_dict.items() if p.requires_grad}
+
+        # create optim groups. any parameters that is 2D will be weight delayed
+        # i.e. all parameters of dim 2 or more will be weight decayed, all params of dim 1 will not (bias and layernorms as well)
+        decay_params = [p for n, p in param_dict.items() if p.dim() >= 2]
+        no_decay_params = [p for n, p in param_dict.items() if p.dim() < 2]
+        optim_groups = [
+            {'params': decay_params, 'weight_decay': weight_decay},
+            {'params': no_decay_params, 'weight_decay': 0.0}
+        ]
+
+        num_decay_params = sum(p.numel() for p in decay_params)
+        num_no_decay_params = sum(p.numel() for p in no_decay_params)
+        print(f"num decayed parameter tensors: {len(decay_params)}, with {num_decay_params:,} parameters")
+        print(f"num non-decayed parameter tensors: {len(no_decay_params)}, with {num_no_decay_params:,} parameters")
+
+        # create AdamW optimizer and use the fused version if it is available
+        fused_available = 'fused' in inspect.signature(torch.optim.AdamW).parameters
+        use_fused = fused_available and 'cuda' in device
+        print(f"using fused AdamW: {use_fused}")
+        optimizer = torch.optim.AdamW(optim_groups, lr=learning_rate, betas=(0.9, 0.95), eps=1e-8, fused=use_fused)
+
+        return optimizer
+
+    
 # ---------------------------------------------------------------------------------
 # DATA LOADER
 # ---------------------------------------------------------------------------------
@@ -260,7 +289,7 @@ model.to(device)
 # add compile for faster training on GPU (if available)
 model = torch.compile(model, mode="default")
 
-max_lr = 3e-4
+max_lr = 6e-4
 min_lr = max_lr * 0.1
 warmup_steps = 10
 max_steps = 50
@@ -280,7 +309,9 @@ def get_lr(it):
     return min_lr + coeff * (max_lr - min_lr)
 
 # optimizer 
-optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, betas=(0.9, 0.95), eps=1e-8) # gpt3 hyperparameters
+# optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, betas=(0.9, 0.95), eps=1e-8)
+optimizer = model.configure_optimizers(weight_decay=0.1, learning_rate=6e-4, device=device)
+
 for step in range(max_steps):
     torch.cuda.synchronize()
     t0 = time.time()
@@ -313,19 +344,14 @@ for step in range(max_steps):
     tokens_per_sec = (train_loader.B * train_loader.T) / dt
 
     print(
-    f"{'Step':>5} | {'Loss':>8} | {'LR':>10} | "
-    f"{'Norm':>8} | {'Time(ms)':>10} | {'Tok/sec':>12}"
+    f"step: {step:5d} | "
+    f"loss: {loss.item():.4f} | "
+    f"lr: {lr:.2e} | "
+    f"norm: {norm:.4f} | "
+    f"dt: {dt * 1000:.2f} | "
+    f"tok/sec: {tokens_per_sec:.2f}"
     )
-    print("-" * 70)
-
-    print(
-    f"{step:5d} | "
-    f"{loss.item():8.4f} | "
-    f"{lr:10.2e} | "
-    f"{norm:8.4f} | "
-    f"{dt * 1000:10.2f} | "
-    f"{tokens_per_sec:12,.2f}"
-    )
+    
 sys.exit(0)
 
 # prefix tokens
