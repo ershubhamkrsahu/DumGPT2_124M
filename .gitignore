@@ -51,6 +51,11 @@ checkpoints/
 runs/
 wandb/
 
+# Training outputs & evaluation caches
+outputs/
+hellaswag/
+logs/
+
 # Local data & datasets
 input.txt
 edu_fineweb10B/
