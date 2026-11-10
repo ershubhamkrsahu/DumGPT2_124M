@@ -467,9 +467,6 @@ optimizer = raw_model.configure_optimizers(
 # =============================================================================
 
 for step in range(max_steps):
-    torch.cuda.synchronize()
-    t0 = time.time()
-    
     # once in a while evaluate our validation loss
     if step % 100 == 0:
         model.eval()
@@ -514,7 +511,7 @@ for step in range(max_steps):
                 # Sample from the top 50 most likely next tokens.
                 topk_prob, topk_idx = torch.topk(probs, k=50, dim=-1)
                 ix = torch.multinomial(topk_prob, num_samples=1, generator=sample_rng)
-                xcol = topk_idx.gather(topk_idx, -1, ix)
+                xcol = topk_idx.gather(-1, ix)
 
                 # Append the sampled token to each sequence.
                 xgen = torch.cat((xgen, xcol), dim=1)
@@ -527,6 +524,8 @@ for step in range(max_steps):
 
     # training loop
     model.train()
+    torch.cuda.synchronize()
+    t0 = time.time()
     optimizer.zero_grad(set_to_none=True)
     loss_accum = 0.0
 
