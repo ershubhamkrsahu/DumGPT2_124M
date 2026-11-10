@@ -350,6 +350,25 @@ Things I'm aware of:
 
 ---
 
+## Phase 9 — running on Kaggle
+
+### 97cf904 + a19ba16 — Kaggle scripts and a pinned environment
+
+I copied the three scripts into `kaggle/` and pointed every path at `/kaggle/working`. The Kaggle training defaults are now `B=2`, `T=1024`, and a 32k-token total batch for two T4s. I also pinned `torch==2.14.1`, bumped `triton-windows`, added matplotlib, and regenerated `uv.lock`.
+
+Why: Kaggle gives two T4s (2×16 GB) for free, which is a lot more throughput than my local GPU and enough VRAM for a real batch. But only `/kaggle/working` survives for the session, so the dataset, checkpoints, and metrics all have to live there. Keeping separate copies means the Kaggle paths don't leak into the local scripts.
+
+What I picked up:
+- Kaggle runs Linux, so the NCCL DDP path that was painful on Windows actually works there.
+- `/kaggle/working` is writable and persists for the session; `/kaggle/input` is read-only. Anything outside working disappears when the session ends.
+- The two T4s have no NVLink, so DDP all-reduce goes over PCIe and scaling won't be linear.
+- My Kaggle effective batch is `B*T*world_size*grad_accum = 2*1024*2*8 = 32,768` tokens.
+- Pinning torch matters because the CUDA wheel index only carries specific builds. A floating version can resolve to a different wheel later.
+- The scripts are duplicated instead of shared because Kaggle notebooks and uploaded datasets are flat; self-contained files avoid import-path headaches.
+- The HellaSwag cache also has to move to `/kaggle/working`, otherwise every session re-downloads it.
+
+---
+
 ## where things stand
 
 - The script trains a randomly initialized GPT-2 124M on shards from the FineWeb-Edu `sample-10BT` dataset.
@@ -360,6 +379,7 @@ Things I'm aware of:
 - Validation loss runs every 250 steps. HellaSwag is wired up but disabled by default (`--hellaswag-interval`).
 - `torch.compile` is not used right now.
 - DDP scaffolding exists but is still unverified on this machine.
+- `kaggle/` holds self-contained copies with `/kaggle/working` paths and dual-T4 defaults (`B=2`, `T=1024`, 32k effective batch).
 
 ## stuff I want to try next
 
@@ -367,6 +387,6 @@ Things I'm aware of:
 - Re-enable compile for the model while keeping generation outside the compiled call.
 - Turn on HellaSwag periodically and compare it against validation loss.
 - Prefetch the next shard in the background so disk reads don't stall the GPU.
+- Run the Kaggle dual-T4 DDP path end to end and measure the scaling.
 - Fix the README so it matches the uv/3.12 setup.
-- Get the DDP path working on a machine with more than one GPU.
 - Tune the batch size and max learning rate for the actual GPU.
