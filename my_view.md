@@ -320,19 +320,53 @@ What I picked up:
 
 ---
 
+## Phase 8 — turning it into a real training setup
+
+### 284e1a8 + 1e73047 + b9e7918 — restructure, checkpoints, metrics, and CLI
+
+I rewrote `train_gpt2.py` around a `main()` function with argparse, moved the configuration into constants at the top, and added checkpointing, CSV metrics, plots, gradient checkpointing, and proper AMP. I also rewrote `hellaswag.py` around my own model, added CLI controls to `fineweb_edu.py`, and wrote a real README.
+
+Why: the old script was one long top-level file with everything hardcoded. I couldn't run a short smoke test without editing source, I couldn't stop and resume a long run, and the only record of progress was console output. If I want to leave training running for hours on a 4 GB GPU, I need checkpoints and metrics.
+
+What changed and what I learned:
+- **Checkpoints**: save model + optimizer + scaler + step + config. The optimizer state is the part people forget — without Adam's moments, resuming resets the adaptive step sizes and the loss jumps. The scaler state matters for fp16 too.
+- **Atomic saves**: write `latest.tmp`, then rename to `latest.pt`. A crash during `torch.save` otherwise leaves a half-written checkpoint and no way back.
+- **Metrics CSV**: one row per step with train loss, val loss, LR, grad norm, step time, tok/s, and HellaSwag. NaNs mean "not measured this step". Much easier to plot than scraping the console.
+- **GradScaler and autocast**: bf16 if the GPU supports it, otherwise fp16. bf16 has fp32's exponent range so it doesn't need loss scaling; fp16 does, so the scaler is enabled only for fp16. CPU stays fp32.
+- **Gradient checkpointing**: don't keep every activation from every block; recompute them in backward. Less VRAM, more compute. That's the trade I need on a small GPU.
+- **memmap shards**: map the 200 MB shard instead of reading it all into RAM. The slice is still copied and converted to int64 for PyTorch, but the full shard never lives in memory.
+- **DDP `no_sync()`**: all-reduce gradients only on the last micro-batch of an accumulation window. Same idea as the old `require_backward_grad_sync` flag, just a cleaner context manager.
+- **CLI**: `--max-steps`, `--sequence-length`, `--total-batch-size`, `--resume`, and HellaSwag options make short runs possible without editing code.
+- **HellaSwag**: each example becomes 4 rows of tokens, a mask marking only the completion, and a label. I score each completion by average token loss, shifting the mask by one because logits at `t` predict token `t+1`, and pick the lowest. `evaluate_hellaswag` restores the previous train/eval mode.
+- **FineWeb `--max-tokens`**: stream and stop at a token budget, so I can make a 700M-token dataset instead of the full 10B. It can cut a document mid-way, which is acceptable for a budget test.
+- **`--overwrite`**: now actually deletes existing shards. Before it just refused to run. Destructive, so it stays opt-in.
+
+Things I'm aware of:
+- I dropped `torch.compile` entirely. That sidesteps the generation-under-compile error, but gives up the speed. The right fix is to compile the model and keep sampling outside the compiled call.
+- HellaSwag defaults to `HELLASWAG_INTERVAL = 0` because 500 examples is slow. I'll turn it on when I want a real number.
+- The default total batch is 8192 tokens (`B=1, T=512`), which is 16 accumulation steps. That's tuned for a small GPU, not for throughput.
+- DDP is still NCCL/Linux-shaped. Windows and my single GPU are still the blockers.
+- The README says Python 3.11 and `requirements.txt`, but the project uses 3.12 and uv/pyproject. I need to fix that.
+
+---
+
 ## where things stand
 
 - The script trains a randomly initialized GPT-2 124M on shards from the FineWeb-Edu `sample-10BT` dataset.
 - The dataset is tokenized into 100 `uint16` shards under `edu_fineweb10B/` (~18.5 GiB): shard 0 is validation, the rest are training. The shards and `input.txt` are ignored by git.
-- It runs up to 19,073 steps with compile, bf16 autocast, Flash Attention, gradient accumulation to a 32k-token effective batch, warmup + cosine LR decay, gradient clipping, fused AdamW with decay/no-decay groups, and tok/s logging.
-- Every 100 steps it also measures validation loss on the held-out shard, and every 100 steps it generates a few sample sequences.
-- DDP scaffolding is in the file but parked — the single-GPU path is what actually runs today.
+- `train_gpt2.py` is now CLI-driven: defaults are 19,073 steps, `B=1`, `T=512`, and an 8,192-token total batch (16 accumulation steps).
+- AMP uses bf16 when supported, otherwise fp16; gradient checkpointing is on so the 124M model fits a 4 GB GPU.
+- Checkpoints go to `checkpoints/latest.pt` every 500 steps, metrics to `outputs/metrics.csv`, and plots to `outputs/plots/` at the end.
+- Validation loss runs every 250 steps. HellaSwag is wired up but disabled by default (`--hellaswag-interval`).
+- `torch.compile` is not used right now.
+- DDP scaffolding exists but is still unverified on this machine.
 
 ## stuff I want to try next
 
-- Confirm generation is stable under `torch.compile`.
+- Run a short smoke test with `--max-steps 10 --sequence-length 256 --total-batch-size 1024`.
+- Re-enable compile for the model while keeping generation outside the compiled call.
+- Turn on HellaSwag periodically and compare it against validation loss.
 - Prefetch the next shard in the background so disk reads don't stall the GPU.
-- Save and resume checkpoints, including optimizer state.
+- Fix the README so it matches the uv/3.12 setup.
 - Get the DDP path working on a machine with more than one GPU.
-- Tune weight decay and the max learning rate further.
-- Generate samples after training so I can actually read what the model learned.
+- Tune the batch size and max learning rate for the actual GPU.
