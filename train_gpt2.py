@@ -21,7 +21,6 @@ import os
 # =============================================================================
 # TOKENIZER
 # =============================================================================
-
 enc = tiktoken.get_encoding("gpt2")
 
 # =============================================================================
@@ -462,13 +461,24 @@ optimizer = raw_model.configure_optimizers(
     device=device,
 )
 
+# Create the log directory we will write checkpoints to 
+log_dir = "logs"
+os.makedirs(log_dir, exist_ok=True)
+log_file = os.path.join(log_dir, "model_log.txt")
+with open(log_file, "w") as f:
+    f.write("Model Log\n")
+    f.write("=" * 50 + "\n\n")
+
 # =============================================================================
 # TRAINING LOOP
 # =============================================================================
 
 for step in range(max_steps):
+    t0 = time.time()
+    last_step = (step == max_steps - 1)
+
     # once in a while evaluate our validation loss
-    if step % 100 == 0:
+    if step % 250 == 0 or last_step:
         model.eval()
         val_loader.reset()
         with torch.no_grad():
@@ -485,11 +495,47 @@ for step in range(max_steps):
             dist.all_reduce(val_loss_accum, op=dist.ReduceOp.AVG)
         if master_process:
             print(f"validation loss: {val_loss_accum.item():.4f}")
+            with open(log_file, "a") as f:
+                f.write(f"step {step}: val loss {val_loss_accum.item():.4f}\n")
+
+    # once in a while evaluate hellaswag
+    if step % 250 == 0 or last_step:
+        num_correct_norm = 0
+        num_total = 0
+
+        for i, example in enumerate(iterate_examples("val")):
+            # only process examples where i % ddp_world_size == ddp_rank:
+            if i % ddp_world_size != ddp_rank:
+                continue
+            # render the example into tokens and labels
+            _, tokens, mask, label = render_example(example)
+            tokens = tokens.to(device)
+            mask = mask.to(device)
+            # get the logits
+            with torch.no_grad():
+                with torch.autocast(device_type=device, dtype=torch.bfloat16):
+                    logits, loss = model(tokens)
+                pred_norm = get_most_likely_row(tokens, mask, logits)
+            num_total += 1
+            num_correct_norm += int(pred_norm == label)
+        # reduce the stats across all processes
+        if ddp:
+            num_total = torch.tensor(num_total, dtype=torch.long, device=device)
+            num_correct_norm = torch.tensor(num_correct_norm, dtype=torch.long, device=device)
+            dist.all_reduce(num_total, op=dist.ReduceOp.SUM)
+            dist.all_reduce(num_correct_norm, op=dist.ReduceOp.SUM)
+            num_total = num_total.item()
+            num_correct_norm = num_correct_norm.item()
+        acc_norm = num_correct_norm / num_total
+        if master_process:
+            print(f"hellaswag accuracy: {num_correct_norm}/{num_total}={acc_norm:.4f}")
+            with open(log_file, "a") as f:
+                f.write(f"step {step}: hell {acc_norm:.4f}\n")
 
     # once in a while generate from the model (except step 0, which is noise)
     # disabled because torch.compile throws error 
     # if torch.compile disabled, this code works fine
-    if step > 0 and step % 100 == 0:
+    if (step > 0 and step % 250) or last_step == 0:
     # if step > 0 and step % 100 == 0 and False:
         model.eval()
         num_return_sequences = 4
@@ -505,7 +551,8 @@ for step in range(max_steps):
         while xgen.size(1) < max_length:
             # forward the model to get the logits
             with torch.no_grad():
-                logits, loss = model(xgen)
+                with torch.autocast(device_type=device, dtype=torch.bfloat16):
+                    logits, loss = model(xgen)
                 logits = logits[:, -1, :]  # Use logits from the final sequence position.
                 probs = f.softmax(logits, dim=-1) # get the probabilities
 
@@ -575,5 +622,10 @@ for step in range(max_steps):
             f"dt: {dt * 1000:.2f} | "
             f"tok/sec: {tokens_per_sec:.2f}"
         )
+        with open(log_file, "a") as f:
+            f.write(
+                f"step {step}: loss {loss_accum.item():.4f}, lr {lr:.2e}, norm {norm:.4f}, dt {dt*1000:.2f}, tok/sec {tokens_per_sec:.2f}\n"
+            )
+
 if ddp:
     dist.destroy_process_group()
