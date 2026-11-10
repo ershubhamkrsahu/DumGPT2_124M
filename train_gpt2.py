@@ -231,7 +231,7 @@ class GPT(nn.Module):
 # DATA LOADER
 # ---------------------------------------------------------------------------------
 class DataLoaderLite:
-    def __init__(self, B, T):
+    def __init__(self, B, T, device):
         self.B = B
         self.T = T
 
@@ -239,7 +239,7 @@ class DataLoaderLite:
         with open('input.txt', 'r') as file:
             text = file.read()
         tokens = enc.encode(text)
-        self.tokens = torch.tensor(tokens)
+        self.tokens = torch.tensor(tokens, dtype=torch.long, device=device)
         print(f"loaded {len(self.tokens)} tokens")
         print(f"1 epoch = {len(self.tokens) // (B * T)} batches")
 
@@ -284,7 +284,7 @@ print(f"gradient accumulation steps: {grad_accum_steps}")
 # ---------------------------------------------------------------------------------
 # GET A DATA BATCH
 # ---------------------------------------------------------------------------------
-train_loader = DataLoaderLite(B=B, T=T)
+train_loader = DataLoaderLite(B=B, T=T, device=device)
 
 # enable mixed precision training
 torch.set_float32_matmul_precision('high')
@@ -328,7 +328,6 @@ for step in range(max_steps):
 
     for micro_step in range(grad_accum_steps):
         x, y = train_loader.next_batch()
-        x, y = x.to(device), y.to(device)
 
         # use automatic mixed precision training  
         with torch.autocast(device_type=device, dtype=torch.bfloat16):
