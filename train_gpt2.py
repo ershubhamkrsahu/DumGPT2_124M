@@ -489,8 +489,8 @@ for step in range(max_steps):
     # once in a while generate from the model (except step 0, which is noise)
     # disabled because torch.compile throws error 
     # if torch.compile disabled, this code works fine
-    if step > 0 and step % 10 == 0:
-    # if step > 0 and step % 10 == 0 and False:
+    if step > 0 and step % 100 == 0:
+    # if step > 0 and step % 100 == 0 and False:
         model.eval()
         num_return_sequences = 4
         max_length = 30
