@@ -316,7 +316,7 @@ What I picked up:
 - I average 20 validation batches (about 82k tokens) to reduce noise. With DDP I all-reduce that average across ranks.
 - Every 100 steps is a compromise. Validation costs time, so I moved it before the timer starts — now `dt` and tok/s only measure the actual training step instead of being dragged down by evaluation.
 - The validation shard is 100M tokens, which is way more than I need, but reusing the shard format kept the loader simple.
-- Generation is behind `and False` because `torch.compile` throws an error when it runs. I fixed the bad `gather` call, but it stays off until I sort out the compile error.
+- Generation now runs every 10 steps. I had it disabled because `torch.compile` threw an error; after fixing the bad `gather` call I turned it back on, so I'm watching whether the compile issue still shows up. Every 10 steps is frequent and eats into throughput, but it's useful while debugging. Each rank seeds its own generator so the ranks don't all sample the same text.
 
 ---
 
@@ -325,12 +325,12 @@ What I picked up:
 - The script trains a randomly initialized GPT-2 124M on shards from the FineWeb-Edu `sample-10BT` dataset.
 - The dataset is tokenized into 100 `uint16` shards under `edu_fineweb10B/` (~18.5 GiB): shard 0 is validation, the rest are training. The shards and `input.txt` are ignored by git.
 - It runs up to 19,073 steps with compile, bf16 autocast, Flash Attention, gradient accumulation to a 32k-token effective batch, warmup + cosine LR decay, gradient clipping, fused AdamW with decay/no-decay groups, and tok/s logging.
-- Every 100 steps it also measures validation loss on the held-out shard. Generation is present but disabled because `torch.compile` errors on it.
+- Every 100 steps it also measures validation loss on the held-out shard, and every 10 steps it generates a few sample sequences.
 - DDP scaffolding is in the file but parked — the single-GPU path is what actually runs today.
 
 ## stuff I want to try next
 
-- Fix the generation path under `torch.compile` (and its `gather` call) so samples can run during training.
+- Confirm generation is stable under `torch.compile` and dial back how often it runs.
 - Prefetch the next shard in the background so disk reads don't stall the GPU.
 - Save and resume checkpoints, including optimizer state.
 - Get the DDP path working on a machine with more than one GPU.
