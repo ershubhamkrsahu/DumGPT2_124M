@@ -65,6 +65,12 @@ DumGPT2_124M/
 │   ├── model.py         # Self-contained GPT-2 inference engine & HF Hub weight loader
 │   ├── requirements.txt # Space runtime dependencies
 │   └── README.md        # Hugging Face Space metadata card
+├── images/              # Training curves and metrics visualization plots
+│   ├── train_loss.png   # Training loss progression (10.8 -> 6.48)
+│   ├── val_loss.png     # Validation loss curve (eval on held-out shard)
+│   ├── learning_rate.png# Cosine decay schedule with warmup
+│   ├── grad_norm.png    # Gradient norm stability with clipping at 1.0
+│   └── tokens_per_sec.png # Throughput over training steps
 ├── notebooks/
 │   └── DumGPT_124M.ipynb # Interactive training, validation, sampling & one-click HF upload
 ├── fineweb_edu.py       # Tokenize FineWeb-Edu into uint16 binary shards
@@ -226,6 +232,20 @@ The full pretraining and export pipeline is packaged in [`notebooks/DumGPT_124M.
 - **Step 200**: Resumed with training loss ~6.85, validation loss 7.04.
 - **Step 1,000**: Final training loss ~6.48, validation loss 6.4468, throughput ~7.8k tokens/sec on GPU.
 - **Generations**: Progressed from random noise to coherent grammar and English sentence structures.
+
+### Training metrics & curves
+
+| Training Loss | Validation Loss |
+| :---: | :---: |
+| ![Training Loss](images/train_loss.png) | ![Validation Loss](images/val_loss.png) |
+
+| Learning Rate Schedule | Gradient Norm |
+| :---: | :---: |
+| ![Learning Rate](images/learning_rate.png) | ![Gradient Norm](images/grad_norm.png) |
+
+| Training Throughput (Tokens / sec) |
+| :---: |
+| ![Tokens per second](images/tokens_per_sec.png) |
 
 ## Interactive UI & free hosting
 
