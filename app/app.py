@@ -318,4 +318,4 @@ with gr.Blocks(title="DumGPT Studio", css=custom_css, theme=gr.themes.Soft()) as
             )
 
 if __name__ == "__main__":
-    demo.queue().launch(share=False, ssr=False)
+    demo.queue().launch()
