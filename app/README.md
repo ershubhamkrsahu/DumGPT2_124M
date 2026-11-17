@@ -8,7 +8,7 @@ sdk_version: 4.44.0
 app_file: app.py
 pinned: false
 license: mit
-short_description: Multi-model interactive playground for DumGPT (Base, RLVR, Distill)
+short_description: Interactive playground for DumGPT models
 ---
 
 # 🧠 DumGPT Studio
