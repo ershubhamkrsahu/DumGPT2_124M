@@ -405,7 +405,7 @@ Why: Having separate scripts in `kaggle/` meant duplicate files to keep in sync.
 
 ## stuff I want to try next
 
-- Deploy the Gradio demo to Hugging Face Spaces ([`shubhamisok/dumllm-studio`](https://huggingface.co/spaces/shubhamisok/dumllm-studio)).
+- Deploy the Gradio demo to Hugging Face Spaces ([`shubhamisok/dumgpt-studio`](https://huggingface.co/spaces/shubhamisok/dumgpt-studio)).
 - Scale pretraining beyond 1,000 steps with a larger context window ($T=1024$) and larger token budget.
 - Evaluate zero-shot HellaSwag accuracy on the 1k-step checkpoint and subsequent checkpoints.
 - Train the planned Stage 2 model: **DumGPT2-124M-RLVR** using the [`shubhamisok/math-500`](https://huggingface.co/datasets/shubhamisok/math-500) dataset with verifiable rewards.

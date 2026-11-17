@@ -48,7 +48,7 @@ Links stay in this table once the weights are uploaded, so it remains the canoni
 - Profile: [huggingface.co/shubhamisok](https://huggingface.co/shubhamisok)
 - Base weights repository: [shubhamisok/DumGPT-124M](https://huggingface.co/shubhamisok/DumGPT-124M) (`pytorch_model.bin`, `dumgpt2-base.pt`, `outputs/`)
 - RLVR math dataset: [shubhamisok/math-500](https://huggingface.co/datasets/shubhamisok/math-500)
-- Interactive demo Space: [shubhamisok/dumllm-studio](https://huggingface.co/spaces/shubhamisok/dumllm-studio)
+- Interactive demo Space: [shubhamisok/dumgpt-studio](https://huggingface.co/spaces/shubhamisok/dumgpt-studio)
 
 ### Upstream references
 
@@ -264,7 +264,7 @@ Open `http://127.0.0.1:7860` in your browser.
 
 ### Hosting 100% free on Hugging Face Spaces
 
-1. Create a new Space on [huggingface.co/new-space](https://huggingface.co/new-space) (e.g. `dumllm-studio`).
+1. Create a new Space on [huggingface.co/new-space](https://huggingface.co/new-space) with the name `dumgpt-studio`.
 2. Select **Gradio** as the Space SDK and choose the **Free CPU (2 vCPU, 16 GB RAM)** hardware tier.
 3. Push or upload the contents of the [`app/`](app/) directory (`app.py`, `model.py`, `requirements.txt`, `README.md`).
 4. Hugging Face Spaces builds the container and serves your model 24/7 at no cost.
