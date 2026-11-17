@@ -369,24 +369,44 @@ What I picked up:
 
 ---
 
+## Phase 10 — notebook workflow, 1,000-step pretraining run, and Hugging Face release
+
+I moved the entire pipeline into `notebooks/DumGPT_124M.ipynb`, ran a 1,000-step pretraining run on FineWeb-Edu, and exported the weights, checkpoints, metrics, and plots directly to Hugging Face Hub (`shubhamisok/DumGPT-124M`). I also retired the separate `kaggle/` folder in favor of the notebook and created an interactive Gradio app in `app/` ready for free hosting on Hugging Face Spaces.
+
+Why: Having separate scripts in `kaggle/` meant duplicate files to keep in sync. An all-in-one Jupyter notebook is much easier to run interactively locally or in the cloud, lets me visualize plots immediately, and lets me push weights to Hugging Face with one cell.
+
+**Training run breakdown (0 → 1,000 steps):**
+- **Settings**: Micro-batch $B=1, T=256$, `TOTAL_BATCH_SIZE=4096` tokens (16 gradient accumulation steps). Warmup for 50 steps to $6 \times 10^{-4}$ followed by cosine decay down to $6 \times 10^{-5}$. Mixed precision with BF16 and fused AdamW.
+- **Initialization**: Started from scratch with random Gaussian weights. Loss began around $\ln(50,304) \approx 10.82$.
+- **Step 200**: Resumed from checkpoint; train loss was 6.85 and validation loss was 7.04.
+- **Step 999**: Train loss converged to 6.48, validation loss dropped to 6.4468. Step time was ~530–650 ms, reaching a throughput of ~7,500–7,800 tokens/sec.
+- **Generation at step 1,000**: Prompted with `"The history of artificial intelligence begins with"`:
+  > *"The history of artificial intelligence begins with a two factors. The American study of an risk of the other health of the first years was not to the use or to the child. The first, a second-scale and has been in which was a problem..."*
+
+**What I picked up:**
+- **Loss vs behavior**: At loss 10.8, the model outputs unreadable character salad. At loss 6.8, it starts learning word boundaries and high-frequency tokens ("the", "of", "and"). By loss 6.45, it reliably outputs correct English words, punctuation, capitalization, and grammatically structured phrase patterns, even before it has semantic reasoning.
+- **`state_dict` vs full checkpoint**:
+  - `pytorch_model.bin` is ~498 MB. It only stores the parameter tensors needed for inference.
+  - `dumgpt2-base.pt` is ~1.49 GB. That's because AdamW tracks two 32-bit floating point moments ($m$ and $v$) for every single parameter, effectively tripling the storage requirement. For continuing training, you need the optimizer states; for deployment/inference, you only want the `state_dict`.
+- **Hugging Face Hub integration**: Using `huggingface_hub.HfApi` inside the notebook makes publishing trivial: `upload_folder` pushes the exported weights, `config.json`, and training plots, while `upload_file` uploads the 1.5 GB resumable checkpoint.
+- **Inference without heavy frameworks**: The model has a custom vocab size of 50,304 and tied embeddings, so standard `transformers.pipeline` doesn't know what to do with it out of the box. Writing a 50-line clean `model.py` that loads the `state_dict` directly from HF Hub via `hf_hub_download` makes the model completely self-contained and runnable anywhere in pure PyTorch and `tiktoken`.
+- **Free hosting with Hugging Face Spaces**: A 124M parameter model in FP32 takes only ~500 MB of RAM. Hugging Face Spaces provides free 2 vCPU / 16 GB RAM instances that run Gradio apps 24/7 at zero cost. Generating 50–100 tokens on CPU takes only a few seconds, making it ideal for free hosting.
+
+---
+
 ## where things stand
 
-- The script trains a randomly initialized GPT-2 124M on shards from the FineWeb-Edu `sample-10BT` dataset.
-- The dataset is tokenized into 100 `uint16` shards under `edu_fineweb10B/` (~18.5 GiB): shard 0 is validation, the rest are training. The shards and `input.txt` are ignored by git.
-- `train_gpt2.py` is now CLI-driven: defaults are 19,073 steps, `B=1`, `T=512`, and an 8,192-token total batch (16 accumulation steps).
-- AMP uses bf16 when supported, otherwise fp16; gradient checkpointing is on so the 124M model fits a 4 GB GPU.
-- Checkpoints go to `checkpoints/latest.pt` every 500 steps, metrics to `outputs/metrics.csv`, and plots to `outputs/plots/` at the end.
-- Validation loss runs every 250 steps. HellaSwag is wired up but disabled by default (`--hellaswag-interval`).
-- `torch.compile` is not used right now.
-- DDP scaffolding exists but is still unverified on this machine.
-- `kaggle/` holds self-contained copies with `/kaggle/working` paths and dual-T4 defaults (`B=2`, `T=1024`, 32k effective batch).
+- The base GPT-2 124M model has completed its initial 1,000-step pretraining run from scratch on FineWeb-Edu.
+- Training dropped cross-entropy loss from ~10.8 down to ~6.48 (val loss 6.4468).
+- Model weights (`pytorch_model.bin`), resumable checkpoint (`checkpoints/dumgpt2-base.pt`), training plots, and CSV logs are publicly available at [`shubhamisok/DumGPT-124M`](https://huggingface.co/shubhamisok/DumGPT-124M).
+- `notebooks/DumGPT_124M.ipynb` is now the primary interactive training, evaluation, and publishing harness.
+- An interactive Gradio web UI is created in `app/` ready to run locally or deploy to Hugging Face Spaces for free.
+- The base scripts (`train_gpt2.py`, `fineweb_edu.py`, `hellaswag.py`) remain intact for CLI/DDP workflows.
 
 ## stuff I want to try next
 
-- Run a short smoke test with `--max-steps 10 --sequence-length 256 --total-batch-size 1024`.
-- Re-enable compile for the model while keeping generation outside the compiled call.
-- Turn on HellaSwag periodically and compare it against validation loss.
-- Prefetch the next shard in the background so disk reads don't stall the GPU.
-- Run the Kaggle dual-T4 DDP path end to end and measure the scaling.
-- Fix the README so it matches the uv/3.12 setup.
-- Tune the batch size and max learning rate for the actual GPU.
+- Deploy the Gradio demo to Hugging Face Spaces ([`shubhamisok/dumllm-studio`](https://huggingface.co/spaces/shubhamisok/dumllm-studio)).
+- Scale pretraining beyond 1,000 steps with a larger context window ($T=1024$) and larger token budget.
+- Evaluate zero-shot HellaSwag accuracy on the 1k-step checkpoint and subsequent checkpoints.
+- Train the planned Stage 2 model: **DumGPT2-124M-RLVR** using the [`shubhamisok/math-500`](https://huggingface.co/datasets/shubhamisok/math-500) dataset with verifiable rewards.
+- Experiment with Stage 3: knowledge distillation from a larger teacher model (e.g. GPT-2 XL or Llama-3).

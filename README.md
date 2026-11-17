@@ -20,7 +20,8 @@ A from-scratch GPT-2 124M language model: FineWeb-Edu preprocessing, single- and
 - [Training](#training)
 - [Monitoring and outputs](#monitoring-and-outputs)
 - [Evaluation](#evaluation)
-- [Kaggle](#kaggle)
+- [Interactive notebook & training runs](#interactive-notebook--training-runs)
+- [Interactive UI & free hosting](#interactive-ui--free-hosting)
 - [Reproducibility notes](#reproducibility-notes)
 - [Acknowledgements](#acknowledgements)
 
@@ -36,7 +37,7 @@ Three models are planned, all released on Hugging Face:
 
 | Model | Stage | Status | Hugging Face |
 | --- | --- | --- | --- |
-| DumGPT2-124M | Base, trained from scratch | Coming soon | [shubhamisok/DumGPT2-124M](https://huggingface.co/shubhamisok/DumGPT2-124M) |
+| DumGPT-124M | Base, trained from scratch (1k-step release) | Available | [shubhamisok/DumGPT-124M](https://huggingface.co/shubhamisok/DumGPT-124M) |
 | DumGPT2-124M-RLVR | RLVR fine-tune | Planned | [shubhamisok/DumGPT2-124M-RLVR](https://huggingface.co/shubhamisok/DumGPT2-124M-RLVR) |
 | DumGPT2-124M-Distill | Distilled | Planned | [shubhamisok/DumGPT2-124M-Distill](https://huggingface.co/shubhamisok/DumGPT2-124M-Distill) |
 
@@ -45,9 +46,9 @@ Links stay in this table once the weights are uploaded, so it remains the canoni
 ## Hugging Face artifacts
 
 - Profile: [huggingface.co/shubhamisok](https://huggingface.co/shubhamisok)
-- Current weights repo: [shubhamisok/dumllm-models](https://huggingface.co/shubhamisok/dumllm-models)
+- Base weights repository: [shubhamisok/DumGPT-124M](https://huggingface.co/shubhamisok/DumGPT-124M) (`pytorch_model.bin`, `dumgpt2-base.pt`, `outputs/`)
 - RLVR math dataset: [shubhamisok/math-500](https://huggingface.co/datasets/shubhamisok/math-500)
-- Demo Space: [shubhamisok/dumllm-studio](https://huggingface.co/spaces/shubhamisok/dumllm-studio)
+- Interactive demo Space: [shubhamisok/dumllm-studio](https://huggingface.co/spaces/shubhamisok/dumllm-studio)
 
 ### Upstream references
 
@@ -59,17 +60,20 @@ Links stay in this table once the weights are uploaded, so it remains the canoni
 
 ```text
 DumGPT2_124M/
+├── app/                 # Gradio Web UI for Hugging Face Spaces and local inference
+│   ├── app.py           # Gradio app with streaming text generation & parameter controls
+│   ├── model.py         # Self-contained GPT-2 inference engine & HF Hub weight loader
+│   ├── requirements.txt # Space runtime dependencies
+│   └── README.md        # Hugging Face Space metadata card
+├── notebooks/
+│   └── DumGPT_124M.ipynb # Interactive training, validation, sampling & one-click HF upload
 ├── fineweb_edu.py       # Tokenize FineWeb-Edu into uint16 binary shards
 ├── train_gpt2.py        # From-scratch GPT-2 124M training (AMP, DDP, checkpoints)
 ├── hellaswag.py         # HellaSwag download, rendering, and scoring
 ├── tinyshakespeare.py   # Downloads Tiny Shakespeare for small local experiments
 ├── utils/
 │   └── check_gpu.py     # CUDA, FP16, and BF16 sanity check
-├── kaggle/
-│   ├── fineweb_edu.py   # Kaggle copy with /kaggle/working paths
-│   ├── train_gpt2.py    # Kaggle copy with dual-T4 defaults
-│   └── hellaswag.py     # Kaggle copy with a local eval cache
-├── my_view.md           # Build log and notes
+├── my_view.md           # Developer journal and architectural learnings
 ├── pyproject.toml       # Dependencies and uv configuration
 └── uv.lock              # Pinned dependency tree
 ```
@@ -206,18 +210,44 @@ python train_gpt2.py --hellaswag-interval 250 --hellaswag-max-examples 500
 
 `hellaswag.py` downloads the validation split once, renders each question as four candidate completions, and scores them by token loss. The cache lives in `hellaswag/` and is ignored by git.
 
-## Kaggle
+## Interactive notebook & training runs
 
-The `kaggle/` directory holds self-contained copies adapted to Kaggle's flat filesystem:
+The full pretraining and export pipeline is packaged in [`notebooks/DumGPT_124M.ipynb`](notebooks/DumGPT_124M.ipynb) for interactive local or cloud execution (Jupyter, Kaggle, Colab):
 
-- All paths point at `/kaggle/working`, the only writable location that persists for a session.
-- Training defaults target two T4 GPUs: `batch_size=2`, `sequence_length=1024`, and a 32,768-token effective batch.
-- Extra CLI options include `--checkpoint-dir`, `--output-dir`, `--save-interval`, `--val-interval`, `--val-steps`, and `--sample-interval`.
+- **Data streaming & tokenization**: Streams `FineWeb-Edu`, encodes via `tiktoken`, and writes memory-mapped `uint16` shards.
+- **Pretraining execution**: Runs the 124M model with Flash Attention (SDPA), fused AdamW, cosine LR schedule ($6 \times 10^{-4} \to 6 \times 10^{-5}$), and gradient accumulation.
+- **Resuming & Checkpoints**: Automatically checks for `checkpoints/latest.pt` and resumes step, model state, optimizer moments, and scaler state.
+- **Evaluation & Sample generation**: Evaluates validation loss and generates live text samples every 250 steps.
+- **Hugging Face Hub export**: Packages `pytorch_model.bin`, `config.json`, `README.md`, resumable checkpoint `checkpoints/dumgpt2-base.pt`, and `outputs/` (metrics and plots) directly to Hugging Face (`shubhamisok/DumGPT-124M`).
 
-```python
-!python fineweb_edu.py --max-tokens 750000000 --workers 4
-!torchrun --standalone --nproc_per_node=2 train_gpt2.py --data-dir /kaggle/working/edu_fineweb10B
+### Milestone: 1,000-Step Pretraining Run
+
+- **Start**: Initialized from random Gaussian weights with cross-entropy loss ~10.8 ($\ln(50,304)$).
+- **Step 200**: Resumed with training loss ~6.85, validation loss 7.04.
+- **Step 1,000**: Final training loss ~6.48, validation loss 6.4468, throughput ~7.8k tokens/sec on GPU.
+- **Generations**: Progressed from random noise to coherent grammar and English sentence structures.
+
+## Interactive UI & free hosting
+
+An interactive web UI powered by [Gradio](https://gradio.app/) is available in the [`app/`](app/) directory:
+
+- **Features**: Interactive text completion playground with streaming tokens, sliders for Temperature ($0.1 - 2.0$), Top-K ($1 - 100$), Max Tokens ($10 - 256$), and Seed, plus model specs and training curves.
+- **Weight Loading**: Automatically pulls `pytorch_model.bin` from [Hugging Face `shubhamisok/DumGPT-124M`](https://huggingface.co/shubhamisok/DumGPT-124M).
+
+### Running locally
+
+```powershell
+pip install gradio tiktoken huggingface_hub torch
+python app/app.py
 ```
+Open `http://127.0.0.1:7860` in your browser.
+
+### Hosting 100% free on Hugging Face Spaces
+
+1. Create a new Space on [huggingface.co/new-space](https://huggingface.co/new-space) (e.g. `dumllm-studio`).
+2. Select **Gradio** as the Space SDK and choose the **Free CPU (2 vCPU, 16 GB RAM)** hardware tier.
+3. Push or upload the contents of the [`app/`](app/) directory (`app.py`, `model.py`, `requirements.txt`, `README.md`).
+4. Hugging Face Spaces builds the container and serves your model 24/7 at no cost.
 
 ## Reproducibility notes
 
