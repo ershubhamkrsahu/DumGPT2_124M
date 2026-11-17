@@ -7,6 +7,20 @@ import torch.nn.functional as F
 import gradio as gr
 from model import load_dumgpt, GPTConfig
 
+# ZeroGPU support for Hugging Face Spaces
+try:
+    import spaces
+except ImportError:
+    class MockSpaces:
+        @staticmethod
+        def GPU(func=None, duration=None):
+            if func is None:
+                def decorator(f):
+                    return f
+                return decorator
+            return func
+    spaces = MockSpaces()
+
 # Device setup
 device = "cuda" if torch.cuda.is_available() else "cpu"
 print(f"Running DumGPT Studio on {device}...")
@@ -98,6 +112,7 @@ def update_model_info(model_name: str) -> str:
     return f"**Model Status**: {badge} &nbsp;|&nbsp; [Hugging Face Repository]({link})\n\n{desc}"
 
 
+@spaces.GPU(duration=60)
 def generate_stream(
     model_name: str,
     prompt: str,
@@ -115,6 +130,9 @@ def generate_stream(
         yield err_msg
         return
 
+    run_device = "cuda" if torch.cuda.is_available() else "cpu"
+    model_inst = model_inst.to(run_device)
+
     if seed is not None and seed >= 0:
         torch.manual_seed(seed)
         random.seed(seed)
@@ -123,7 +141,7 @@ def generate_stream(
     if len(tokens) > config_inst.block_size - 10:
         tokens = tokens[-(config_inst.block_size - 10):]
 
-    x = torch.tensor(tokens, dtype=torch.long, device=device).unsqueeze(0)
+    x = torch.tensor(tokens, dtype=torch.long, device=run_device).unsqueeze(0)
     generated_text = prompt
     start_time = time.time()
 
@@ -156,7 +174,7 @@ def generate_stream(
     summary = (
         f"\n\n---\n"
         f"*{model_name} • Generated {max_new_tokens} tokens in {dt:.2f}s "
-        f"({tok_sec:.1f} tokens/sec on {device.upper()})*"
+        f"({tok_sec:.1f} tokens/sec on {run_device.upper()})*"
     )
     yield generated_text + summary
 
@@ -300,4 +318,4 @@ with gr.Blocks(title="DumGPT Studio", css=custom_css, theme=gr.themes.Soft()) as
             )
 
 if __name__ == "__main__":
-    demo.queue().launch(share=False)
+    demo.queue().launch(share=False, ssr=False)
