@@ -1,24 +1,25 @@
 ---
-title: DumGPT Studio
+title: DumGPT — 124M Playground
 emoji: 🧠
-colorFrom: indigo
-colorTo: blue
+colorFrom: purple
+colorTo: pink
 sdk: gradio
 sdk_version: 5.20.0
 app_file: app.py
 pinned: false
 license: mit
-short_description: Interactive playground for DumGPT models
+short_description: Continue any prompt with a 124M model trained from scratch
 ---
 
-# 🧠 DumGPT Studio
+# DumGPT — 124M Playground
 
-Interactive multi-model studio for the **DumGPT** language model family:
+An interactive playground for **DumGPT-124M**, a GPT-2-style decoder-only
+language model trained from scratch on FineWeb-Edu.
 
-- **DumGPT-124M (Base)**: 124M parameter GPT-2 architecture trained from scratch on FineWeb-Edu.
-- **DumGPT2-124M-RLVR**: Post-training fine-tune using Reinforcement Learning with Verifiable Rewards on `math-500` *(In Development)*.
-- **DumGPT2-124M-Distill**: Knowledge-distilled compact model *(Planned)*.
+The Space serves the `DumGPT-124M-base.pth` checkpoint and streams generated
+text token by token. Advanced sampling controls are available in a collapsed
+drawer, while the default experience stays focused on prompting and generating.
 
 ### References
-- **Base Model Repository**: [shubhamisok/DumGPT-124M](https://huggingface.co/shubhamisok/DumGPT-124M)
+- **Checkpoint**: [DumGPT-124M-base.pth](https://huggingface.co/shubhamisok/DumGPT-124M/blob/main/DumGPT-124M-base.pth)
 - **Source Code**: [GitHub - DumGPT2_124M](https://github.com/ShubhamKumarSahu-svg/DumGPT2_124M)

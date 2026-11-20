@@ -1,11 +1,13 @@
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from pathlib import Path
+from typing import Any
+
 import tiktoken
 import torch
 import torch.nn as nn
-from torch.nn import functional as F
 from huggingface_hub import hf_hub_download
+from torch.nn import functional as F
 
 
 @dataclass
@@ -27,14 +29,14 @@ class CausalSelfAttention(nn.Module):
         self.n_embd = config.n_embd
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        B, T, C = x.size()
+        batch_size, sequence_length, channels = x.size()
         qkv = self.c_attn(x)
         q, k, v = qkv.split(self.n_embd, dim=2)
-        k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
-        q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
-        v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
+        k = k.view(batch_size, sequence_length, self.n_head, channels // self.n_head).transpose(1, 2)
+        q = q.view(batch_size, sequence_length, self.n_head, channels // self.n_head).transpose(1, 2)
+        v = v.view(batch_size, sequence_length, self.n_head, channels // self.n_head).transpose(1, 2)
         y = F.scaled_dot_product_attention(q, k, v, is_causal=True)
-        y = y.transpose(1, 2).contiguous().view(B, T, C)
+        y = y.transpose(1, 2).contiguous().view(batch_size, sequence_length, channels)
         return self.c_proj(y)
 
 
@@ -46,9 +48,7 @@ class MLP(nn.Module):
         self.c_proj = nn.Linear(4 * config.n_embd, config.n_embd)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.c_fc(x)
-        x = self.gelu(x)
-        return self.c_proj(x)
+        return self.c_proj(self.gelu(self.c_fc(x)))
 
 
 class Block(nn.Module):
@@ -61,67 +61,89 @@ class Block(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = x + self.attn(self.ln_1(x))
-        x = x + self.mlp(self.ln_2(x))
-        return x
+        return x + self.mlp(self.ln_2(x))
 
 
 class GPT(nn.Module):
     def __init__(self, config: GPTConfig):
         super().__init__()
         self.config = config
-        self.transformer = nn.ModuleDict(dict(
-            wte=nn.Embedding(config.vocab_size, config.n_embd),
-            wpe=nn.Embedding(config.block_size, config.n_embd),
-            h=nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
-            ln_f=nn.LayerNorm(config.n_embd),
-        ))
+        self.transformer = nn.ModuleDict(
+            dict(
+                wte=nn.Embedding(config.vocab_size, config.n_embd),
+                wpe=nn.Embedding(config.block_size, config.n_embd),
+                h=nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
+                ln_f=nn.LayerNorm(config.n_embd),
+            )
+        )
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
         self.transformer.wte.weight = self.lm_head.weight
 
     def forward(self, idx: torch.Tensor) -> torch.Tensor:
-        B, T = idx.size()
-        assert T <= self.config.block_size, f"Cannot forward sequence of length {T}, block size is {self.config.block_size}"
-        pos = torch.arange(0, T, dtype=torch.long, device=idx.device)
-        tok_emb = self.transformer.wte(idx)
-        pos_emb = self.transformer.wpe(pos)
-        x = tok_emb + pos_emb
+        _, sequence_length = idx.size()
+        if sequence_length > self.config.block_size:
+            raise ValueError(
+                f"Cannot forward sequence of length {sequence_length}; "
+                f"the context window is {self.config.block_size}."
+            )
+        positions = torch.arange(sequence_length, dtype=torch.long, device=idx.device)
+        x = self.transformer.wte(idx) + self.transformer.wpe(positions)
         for block in self.transformer.h:
             x = block(x)
-        x = self.transformer.ln_f(x)
-        logits = self.lm_head(x)
-        return logits
+        return self.lm_head(self.transformer.ln_f(x))
 
 
-def load_dumgpt(repo_or_dir: str = "shubhamisok/DumGPT-124M", device: str = "cpu"):
-    """
-    Loads DumGPT-124M from a local folder or directly from Hugging Face Hub.
-    """
+def _config_from_dict(values: dict[str, Any]) -> GPTConfig:
+    allowed = {field.name for field in fields(GPTConfig)}
+    return GPTConfig(**{key: value for key, value in values.items() if key in allowed})
+
+
+def _extract_state_dict(checkpoint: Any) -> dict[str, torch.Tensor]:
+    """Accept raw weights and the common training-checkpoint wrappers."""
+    if not isinstance(checkpoint, dict):
+        raise TypeError("The checkpoint is not a PyTorch state dictionary.")
+
+    for key in ("model", "model_state_dict", "state_dict"):
+        candidate = checkpoint.get(key)
+        if isinstance(candidate, dict):
+            checkpoint = candidate
+            break
+
+    if not checkpoint or not all(torch.is_tensor(value) for value in checkpoint.values()):
+        raise ValueError("No model state dictionary was found in the checkpoint.")
+
+    cleaned = {}
+    for key, value in checkpoint.items():
+        while key.startswith(("_orig_mod.", "module.")):
+            key = key.split(".", 1)[1]
+        cleaned[key] = value
+    return cleaned
+
+
+def load_dumgpt(
+    repo_or_dir: str = "shubhamisok/DumGPT-124M",
+    filename: str = "DumGPT-124M-base.pth",
+    device: str = "cpu",
+):
+    """Load DumGPT from a local directory or a Hugging Face model repository."""
     local_path = Path(repo_or_dir)
-    if local_path.exists() and (local_path / "pytorch_model.bin").exists():
-        weights_path = local_path / "pytorch_model.bin"
+    if local_path.exists():
+        weights_path = local_path / filename
         config_path = local_path / "config.json"
-        if config_path.exists():
-            with open(config_path, "r", encoding="utf-8") as f:
-                cfg_dict = json.load(f)
-            config = GPTConfig(**cfg_dict)
-        else:
-            config = GPTConfig()
     else:
-        # Download from Hugging Face Hub
-        weights_path = hf_hub_download(repo_id=repo_or_dir, filename="pytorch_model.bin")
-        try:
-            cfg_file = hf_hub_download(repo_id=repo_or_dir, filename="config.json")
-            with open(cfg_file, "r", encoding="utf-8") as f:
-                cfg_dict = json.load(f)
-            config = GPTConfig(**cfg_dict)
-        except Exception:
-            config = GPTConfig()
+        weights_path = Path(hf_hub_download(repo_id=repo_or_dir, filename=filename))
+        config_path = Path(hf_hub_download(repo_id=repo_or_dir, filename="config.json"))
 
+    if not weights_path.exists():
+        raise FileNotFoundError(f"Checkpoint not found: {weights_path}")
+
+    config = GPTConfig()
+    if config_path.exists():
+        with config_path.open("r", encoding="utf-8") as config_file:
+            config = _config_from_dict(json.load(config_file))
+
+    checkpoint = torch.load(weights_path, map_location="cpu", weights_only=True)
     model = GPT(config)
-    state_dict = torch.load(weights_path, map_location=device, weights_only=True)
-    model.load_state_dict(state_dict)
-    model.to(device)
-    model.eval()
-
-    enc = tiktoken.get_encoding("gpt2")
-    return model, enc, config
+    model.load_state_dict(_extract_state_dict(checkpoint), strict=True)
+    model.to(device).eval()
+    return model, tiktoken.get_encoding("gpt2"), config
