@@ -21,5 +21,5 @@ text token by token. Advanced sampling controls are available in a collapsed
 drawer, while the default experience stays focused on prompting and generating.
 
 ### References
-- **Checkpoint**: [DumGPT-124M-base.pth](https://huggingface.co/shubhamisok/DumGPT-124M/blob/main/DumGPT-124M-base.pth)
-- **Source Code**: [GitHub - DumGPT2_124M](https://github.com/ShubhamKumarSahu-svg/DumGPT2_124M)
+- **Checkpoint**: [DumGPT-124M-base.pth](https://huggingface.co/ershubhamkrsahu/DumGPT-124M/blob/main/DumGPT-124M-base.pth)
+- **Source Code**: [GitHub - DumGPT2_124M](https://github.com/ershubhamkrsahu/DumGPT2_124M)

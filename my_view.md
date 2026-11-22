@@ -371,7 +371,7 @@ What I picked up:
 
 ## Phase 10 — notebook workflow, 1,000-step pretraining run, and Hugging Face release
 
-I moved the entire pipeline into `notebooks/DumGPT_124M.ipynb`, ran a 1,000-step pretraining run on FineWeb-Edu, and exported the weights, checkpoints, metrics, and plots directly to Hugging Face Hub (`shubhamisok/DumGPT-124M`). I also retired the separate `kaggle/` folder in favor of the notebook and created an interactive Gradio app in `app/` ready for free hosting on Hugging Face Spaces.
+I moved the entire pipeline into `notebooks/DumGPT_124M.ipynb`, ran a 1,000-step pretraining run on FineWeb-Edu, and exported the weights, checkpoints, metrics, and plots directly to Hugging Face Hub (`ershubhamkrsahu/DumGPT-124M`). I also retired the separate `kaggle/` folder in favor of the notebook and created an interactive Gradio app in `app/` ready for free hosting on Hugging Face Spaces.
 
 Why: Having separate scripts in `kaggle/` meant duplicate files to keep in sync. An all-in-one Jupyter notebook is much easier to run interactively locally or in the cloud, lets me visualize plots immediately, and lets me push weights to Hugging Face with one cell.
 
@@ -398,15 +398,15 @@ Why: Having separate scripts in `kaggle/` meant duplicate files to keep in sync.
 
 - The base GPT-2 124M model has completed its initial 1,000-step pretraining run from scratch on FineWeb-Edu.
 - Training dropped cross-entropy loss from ~10.8 down to ~6.48 (val loss 6.4468).
-- Model weights (`pytorch_model.bin`), resumable checkpoint (`checkpoints/dumgpt2-base.pt`), training plots, and CSV logs are publicly available at [`shubhamisok/DumGPT-124M`](https://huggingface.co/shubhamisok/DumGPT-124M).
+- Model weights (`pytorch_model.bin`), resumable checkpoint (`checkpoints/dumgpt2-base.pt`), training plots, and CSV logs are publicly available at [`ershubhamkrsahu/DumGPT-124M`](https://huggingface.co/ershubhamkrsahu/DumGPT-124M).
 - `notebooks/DumGPT_124M.ipynb` is now the primary interactive training, evaluation, and publishing harness.
 - An interactive Gradio web UI is created in `app/` ready to run locally or deploy to Hugging Face Spaces for free.
 - The base scripts (`train_gpt2.py`, `fineweb_edu.py`, `hellaswag.py`) remain intact for CLI/DDP workflows.
 
 ## stuff I want to try next
 
-- Deploy the Gradio demo to Hugging Face Spaces ([`shubhamisok/dumgpt-studio`](https://huggingface.co/spaces/shubhamisok/dumgpt-studio)).
+- Deploy the Gradio demo to Hugging Face Spaces ([`ershubhamkrsahu/dumgpt-studio`](https://huggingface.co/spaces/ershubhamkrsahu/dumgpt-studio)).
 - Scale pretraining beyond 1,000 steps with a larger context window ($T=1024$) and larger token budget.
 - Evaluate zero-shot HellaSwag accuracy on the 1k-step checkpoint and subsequent checkpoints.
-- Train the planned Stage 2 model: **DumGPT2-124M-RLVR** using the [`shubhamisok/math-500`](https://huggingface.co/datasets/shubhamisok/math-500) dataset with verifiable rewards.
+- Train the planned Stage 2 model: **DumGPT2-124M-RLVR** using the [`ershubhamkrsahu/math-500`](https://huggingface.co/datasets/ershubhamkrsahu/math-500) dataset with verifiable rewards.
 - Experiment with Stage 3: knowledge distillation from a larger teacher model (e.g. GPT-2 XL or Llama-3).

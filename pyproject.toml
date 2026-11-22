@@ -5,7 +5,7 @@ version = "0.1.0"
 description = "A GPT-2 implementation and training project"
 readme = "README.md"
 authors = [
-    { name = "Shubham Kumar Sahu", email = "shubhamisok@gmail.com" }
+    { name = "ershubhamkrsahu", email = "359990826+ershubhamkrsahu@users.noreply.github.com" }
 ]
 requires-python = ">=3.12,<3.13"
 

@@ -21,7 +21,7 @@ except ImportError:
     spaces = MockSpaces()
 
 
-MODEL_REPO = "shubhamisok/DumGPT-124M"
+MODEL_REPO = "ershubhamkrsahu/DumGPT-124M"
 MODEL_FILENAME = "DumGPT-124M-base.pth"
 DEFAULT_MAX_TOKENS = 80
 DEFAULT_TEMPERATURE = 0.8

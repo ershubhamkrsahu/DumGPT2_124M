@@ -3,7 +3,7 @@
 [![Python](https://img.shields.io/badge/python-3.12-blue.svg)](https://www.python.org/)
 [![PyTorch](https://img.shields.io/badge/PyTorch-2.14-ee4c2c.svg)](https://pytorch.org/)
 [![Model](https://img.shields.io/badge/model-GPT--2%20124M-6f42c1.svg)](#training-roadmap)
-[![Hugging Face](https://img.shields.io/badge/%F0%9F%A4%97-shubhamisok-yellow.svg)](https://huggingface.co/shubhamisok)
+[![Hugging Face](https://img.shields.io/badge/%F0%9F%A4%97-ershubhamkrsahu-yellow.svg)](https://huggingface.co/ershubhamkrsahu)
 
 A from-scratch GPT-2 124M language model: FineWeb-Edu preprocessing, single- and dual-GPU training, checkpointing, metrics, HellaSwag evaluation, and plots.
 
@@ -30,25 +30,25 @@ A from-scratch GPT-2 124M language model: FineWeb-Edu preprocessing, single- and
 Three models are planned, all released on Hugging Face:
 
 1. **Base** — a 124M model trained from scratch by me on FineWeb-Edu.
-2. **RLVR** — the base model further trained with reinforcement learning with verifiable rewards, starting from the [`math-500`](https://huggingface.co/datasets/shubhamisok/math-500) dataset.
+2. **RLVR** — the base model further trained with reinforcement learning with verifiable rewards, starting from the [`math-500`](https://huggingface.co/datasets/ershubhamkrsahu/math-500) dataset.
 3. **Distillation** — the base model distilled from a stronger teacher model.
 
 ## Models on Hugging Face
 
 | Model | Stage | Status | Hugging Face |
 | --- | --- | --- | --- |
-| DumGPT-124M | Base, trained from scratch (1k-step release) | Available | [shubhamisok/DumGPT-124M](https://huggingface.co/shubhamisok/DumGPT-124M) |
-| DumGPT2-124M-RLVR | RLVR fine-tune | Planned | [shubhamisok/DumGPT2-124M-RLVR](https://huggingface.co/shubhamisok/DumGPT2-124M-RLVR) |
-| DumGPT2-124M-Distill | Distilled | Planned | [shubhamisok/DumGPT2-124M-Distill](https://huggingface.co/shubhamisok/DumGPT2-124M-Distill) |
+| DumGPT-124M | Base, trained from scratch (1k-step release) | Available | [ershubhamkrsahu/DumGPT-124M](https://huggingface.co/ershubhamkrsahu/DumGPT-124M) |
+| DumGPT2-124M-RLVR | RLVR fine-tune | Planned | [ershubhamkrsahu/DumGPT2-124M-RLVR](https://huggingface.co/ershubhamkrsahu/DumGPT2-124M-RLVR) |
+| DumGPT2-124M-Distill | Distilled | Planned | [ershubhamkrsahu/DumGPT2-124M-Distill](https://huggingface.co/ershubhamkrsahu/DumGPT2-124M-Distill) |
 
 Links stay in this table once the weights are uploaded, so it remains the canonical index for the model cards.
 
 ## Hugging Face artifacts
 
-- Profile: [huggingface.co/shubhamisok](https://huggingface.co/shubhamisok)
-- Base weights repository: [shubhamisok/DumGPT-124M](https://huggingface.co/shubhamisok/DumGPT-124M) (`pytorch_model.bin`, `dumgpt2-base.pt`, `outputs/`)
-- RLVR math dataset: [shubhamisok/math-500](https://huggingface.co/datasets/shubhamisok/math-500)
-- Interactive demo Space: [shubhamisok/dumgpt-studio](https://huggingface.co/spaces/shubhamisok/dumgpt-studio)
+- Profile: [huggingface.co/ershubhamkrsahu](https://huggingface.co/ershubhamkrsahu)
+- Base weights repository: [ershubhamkrsahu/DumGPT-124M](https://huggingface.co/ershubhamkrsahu/DumGPT-124M) (`pytorch_model.bin`, `dumgpt2-base.pt`, `outputs/`)
+- RLVR math dataset: [ershubhamkrsahu/math-500](https://huggingface.co/datasets/ershubhamkrsahu/math-500)
+- Interactive demo Space: [ershubhamkrsahu/dumgpt-studio](https://huggingface.co/spaces/ershubhamkrsahu/dumgpt-studio)
 
 ### Upstream references
 
@@ -89,7 +89,7 @@ DumGPT2_124M/
 Requires Python 3.12 (pinned in `.python-version`), [uv](https://docs.astral.sh/uv/), and a CUDA-capable GPU for training. A CUDA-enabled PyTorch build is selected through `pyproject.toml`; see [pytorch.org](https://pytorch.org/get-started/locally/) if you need a different CUDA version.
 
 ```powershell
-git clone https://github.com/ShubhamKumarSahu-svg/DumGPT2_124M.git
+git clone https://github.com/ershubhamkrsahu/DumGPT2_124M.git
 cd DumGPT2_124M
 uv venv --python 3.12
 .venv\Scripts\activate
@@ -224,7 +224,7 @@ The full pretraining and export pipeline is packaged in [`notebooks/DumGPT_124M.
 - **Pretraining execution**: Runs the 124M model with Flash Attention (SDPA), fused AdamW, cosine LR schedule ($6 \times 10^{-4} \to 6 \times 10^{-5}$), and gradient accumulation.
 - **Resuming & Checkpoints**: Automatically checks for `checkpoints/latest.pt` and resumes step, model state, optimizer moments, and scaler state.
 - **Evaluation & Sample generation**: Evaluates validation loss and generates live text samples every 250 steps.
-- **Hugging Face Hub export**: Packages `pytorch_model.bin`, `config.json`, `README.md`, resumable checkpoint `checkpoints/dumgpt2-base.pt`, and `outputs/` (metrics and plots) directly to Hugging Face (`shubhamisok/DumGPT-124M`).
+- **Hugging Face Hub export**: Packages `pytorch_model.bin`, `config.json`, `README.md`, resumable checkpoint `checkpoints/dumgpt2-base.pt`, and `outputs/` (metrics and plots) directly to Hugging Face (`ershubhamkrsahu/DumGPT-124M`).
 
 ### Milestone: 1,000-Step Pretraining Run
 
@@ -252,7 +252,7 @@ The full pretraining and export pipeline is packaged in [`notebooks/DumGPT_124M.
 An interactive web UI powered by [Gradio](https://gradio.app/) is available in the [`app/`](app/) directory:
 
 - **Features**: Interactive text completion playground with streaming tokens, sliders for Temperature ($0.1 - 2.0$), Top-K ($1 - 100$), Max Tokens ($10 - 256$), and Seed, plus model specs and training curves.
-- **Weight Loading**: Automatically pulls `pytorch_model.bin` from [Hugging Face `shubhamisok/DumGPT-124M`](https://huggingface.co/shubhamisok/DumGPT-124M).
+- **Weight Loading**: Automatically pulls `pytorch_model.bin` from [Hugging Face `ershubhamkrsahu/DumGPT-124M`](https://huggingface.co/ershubhamkrsahu/DumGPT-124M).
 
 ### Running locally
 

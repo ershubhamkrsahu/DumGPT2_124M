@@ -121,7 +121,7 @@ def _extract_state_dict(checkpoint: Any) -> dict[str, torch.Tensor]:
 
 
 def load_dumgpt(
-    repo_or_dir: str = "shubhamisok/DumGPT-124M",
+    repo_or_dir: str = "ershubhamkrsahu/DumGPT-124M",
     filename: str = "DumGPT-124M-base.pth",
     device: str = "cpu",
 ):
